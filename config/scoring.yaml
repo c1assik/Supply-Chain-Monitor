@@ -1,0 +1,25 @@
+# Веса скоринга. Вклад сигнала: вес * confidence.
+
+# Вес сигнала по умолчанию.
+severity_weights:
+  low: 5
+  medium: 15
+  high: 35
+  critical: 60
+
+# Переопределение веса для конкретных правил: rule_id: вес.
+rule_weights: {}
+
+# Комбинации правил дают бонус к сумме:
+#   - rules: [metadata.new_package, metadata.typosquat, static.setup_network]
+#     bonus: 30
+combos: []
+
+# Множитель для пакетов из топа по загрузкам.
+popularity_multiplier: 1.5
+
+# Нижние границы уровней. Всё, что ниже medium, считается low.
+levels:
+  critical: 80
+  high: 50
+  medium: 20
