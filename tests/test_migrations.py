@@ -14,7 +14,15 @@ from sqlalchemy.orm import Session
 from pypi_monitor.db.models import Package, Release
 from pypi_monitor.domain import ReleaseStatus
 
-TABLES = {"packages", "releases", "artifacts", "analysis_runs", "signals", "verdicts"}
+TABLES = {
+    "packages",
+    "releases",
+    "artifacts",
+    "analysis_runs",
+    "signals",
+    "verdicts",
+    "ingest_cursors",
+}
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 

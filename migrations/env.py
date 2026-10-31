@@ -5,7 +5,9 @@ from pypi_monitor.db.models import Base
 from pypi_monitor.settings import get_settings
 
 # Tests point Alembic at their own database through sqlalchemy.url.
-url = context.config.get_main_option("sqlalchemy.url") or get_settings().database_url
+url = context.config.get_main_option("sqlalchemy.url") or (
+    get_settings().database_url.get_secret_value()
+)
 
 if context.is_offline_mode():
     context.configure(url=url, target_metadata=Base.metadata, literal_binds=True)

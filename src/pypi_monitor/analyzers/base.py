@@ -36,7 +36,8 @@ class ReleaseContext(BaseModel):
 class Analyzer(ABC):
     """Base class for analyzers.
 
-    `analyze` is synchronous because analyzers are CPU-bound; the worker decides where it runs.
+    `analyze` is synchronous because analyzers are CPU-bound; the worker decides where it runs,
+    so an analyzer must survive pickling.
     Bump `version` whenever results may change, so old releases can be re-analyzed and compared.
     """
 

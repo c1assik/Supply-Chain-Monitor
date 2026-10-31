@@ -1,0 +1,18 @@
+groups:
+  - name: pipeline
+    rules:
+      # Изменения API PyPI ломают пайплайн молча: поток падает до нуля без ошибок.
+      - alert: FeedIsSilent
+        expr: sum(increase(scm_releases_ingested_total[30m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: За 30 минут не записано ни одного нового релиза
+      - alert: VerdictLatencyTooHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(scm_verdict_latency_seconds_bucket[30m]))) > 600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: p95 задержки до вердикта выше 10 минут

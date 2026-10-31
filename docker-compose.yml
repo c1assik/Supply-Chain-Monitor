@@ -1,11 +1,29 @@
 name: scm
 
+# Сервисы приложения. Воркер работает с живой малварью как с данными, поэтому без лишних прав.
+x-app: &app
+  build: .
+  restart: unless-stopped
+  environment:
+    SCM_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-scm}:${POSTGRES_PASSWORD:?задайте в .env}@postgres:5432/${POSTGRES_DB:-scm}
+    SCM_REDIS_URL: redis://:${REDIS_PASSWORD:?задайте в .env}@redis:6379/0
+    SCM_S3_ENDPOINT: http://s3:8333
+    SCM_S3_ACCESS_KEY: ${S3_ACCESS_KEY:?задайте в .env}
+    SCM_S3_SECRET_KEY: ${S3_SECRET_KEY:?задайте в .env}
+    SCM_S3_BUCKET: ${S3_BUCKET:-artifacts}
+    SCM_TELEGRAM_TOKEN: ${SCM_TELEGRAM_TOKEN:-}
+    SCM_TELEGRAM_CHAT_ID: ${SCM_TELEGRAM_CHAT_ID:-}
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
 services:
   postgres:
     image: postgres:18-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-scm}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте в .env}
       POSTGRES_DB: ${POSTGRES_DB:-scm}
     ports:
       - "127.0.0.1:5432:5432"
@@ -20,7 +38,10 @@ services:
 
   redis:
     image: redis:8.8-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?задайте в .env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?задайте в .env}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -36,8 +57,8 @@ services:
     image: chrislusf/seaweedfs:4.51
     command: ["mini", "-dir=/data"]
     environment:
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-scm-dev}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-scm-dev-secret}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?задайте в .env}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?задайте в .env}
       S3_BUCKET: ${S3_BUCKET:-artifacts}
     ports:
       - "127.0.0.1:8333:8333"
@@ -49,7 +70,54 @@ services:
       timeout: 3s
       retries: 20
 
+  migrate:
+    <<: *app
+    entrypoint: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  poller:
+    <<: *app
+    command: ["poller"]
+    depends_on: &app-dependencies
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    depends_on: *app-dependencies
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.2.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?задайте в .env}
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   postgres-data:
   redis-data:
   s3-data:
+  prometheus-data:
+  grafana-data:

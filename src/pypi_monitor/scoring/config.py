@@ -30,12 +30,18 @@ class LevelThresholds(_Config):
         return self
 
 
+class Allowlist(_Config):
+    packages: frozenset[str] = frozenset()
+    rules: frozenset[str] = frozenset()
+
+
 class ScoringConfig(_Config):
     severity_weights: dict[Severity, float]
     rule_weights: dict[str, float] = Field(default_factory=dict)
     combos: list[Combo] = Field(default_factory=list)
     popularity_multiplier: float = Field(ge=1)
     levels: LevelThresholds
+    allowlist: Allowlist = Allowlist()
 
     @model_validator(mode="after")
     def _check_all_severities(self) -> Self:
