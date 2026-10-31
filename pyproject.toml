@@ -10,19 +10,33 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20",
+    "arq>=0.28",
+    "boto3>=1.43",
+    "defusedxml>=0.7",
+    # Rules decide the results, so the version is pinned and is part of analyzer_version.
+    "guarddog==3.2.0",
+    "httpx>=0.28",
+    "packaging>=26.3",
+    "prometheus-client>=0.22",
     "psycopg[binary]>=3.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.6",
     "pyyaml>=6.0",
-    "sqlalchemy>=2.0",
+    "rapidfuzz>=3.13",
+    "sqlalchemy[asyncio]>=2.0",
 ]
+
+[project.scripts]
+pypi-monitor = "pypi_monitor.cli:main"
 
 [dependency-groups]
 dev = [
     "mypy>=1.13",
     "pre-commit>=4.0",
     "pytest>=8.3",
+    "pytest-asyncio>=1.0",
     "ruff>=0.8",
+    "types-defusedxml>=0.7",
     "types-pyyaml>=6.0",
 ]
 
@@ -32,6 +46,8 @@ packages = ["src/pypi_monitor"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100
@@ -41,9 +57,13 @@ src = ["src"]
 select = ["E", "F", "W", "I", "UP", "B", "S", "C4", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]
+"tests/*" = ["S101", "S108"]
 
 [tool.mypy]
 strict = true
 files = ["src", "tests", "migrations"]
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["arq.*", "boto3.*", "botocore.*", "guarddog.*"]
+ignore_missing_imports = true

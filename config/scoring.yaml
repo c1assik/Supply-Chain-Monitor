@@ -10,10 +10,24 @@ severity_weights:
 # Переопределение веса для конкретных правил: rule_id: вес.
 rule_weights: {}
 
-# Комбинации правил дают бонус к сумме:
-#   - rules: [metadata.new_package, metadata.typosquat, static.setup_network]
-#     bonus: 30
-combos: []
+# Комбинации правил дают бонус к сумме. В rules можно использовать шаблоны с *.
+# guarddog.install.* — находки в коде, который исполняется при установке или импорте.
+combos:
+  - rules: [metadata.typosquat, metadata.new_package]
+    bonus: 20
+  - rules: [metadata.typosquat, guarddog.*threat-*]
+    bonus: 30
+  - rules: [metadata.new_package, guarddog.install.threat-*]
+    bonus: 10
+  - rules: [guarddog.capability-process-hooks, guarddog.install.threat-*]
+    bonus: 20
+
+# Подавление известных ложных срабатываний.
+allowlist:
+  # Нормализованные имена пакетов: их релизы всегда получают скор 0.
+  packages: []
+  # Правила, которые не участвуют в скоринге.
+  rules: []
 
 # Множитель для пакетов из топа по загрузкам.
 popularity_multiplier: 1.5

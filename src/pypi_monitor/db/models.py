@@ -78,10 +78,21 @@ class Release(Base):
     prev_release_id: Mapped[int | None] = mapped_column(
         ForeignKey("releases.id", ondelete="SET NULL")
     )
+    # Snapshot of the PyPI metadata: packages get deleted, and it is evidence.
+    pypi_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")
     status: Mapped[ReleaseStatus] = mapped_column(
         _enum(ReleaseStatus, "status"), server_default=ReleaseStatus.QUEUED.value
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IngestCursor(Base):
+    """Last processed PyPI serial of a named event source."""
+
+    __tablename__ = "ingest_cursors"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    serial: Mapped[int] = mapped_column(BigInteger)
 
 
 class Artifact(Base):
