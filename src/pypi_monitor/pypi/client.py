@@ -18,6 +18,7 @@ FILES_HOST = "files.pythonhosted.org"
 # the limit. The usual flow is about one new package a minute.
 USER_LOOKUP_INTERVAL_S = 6
 USER_AGENT = f"pypi-supply-chain-monitor/{__version__}"
+SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 
 
 class NotReadyError(Exception):
@@ -70,6 +71,10 @@ class PyPIClient:
     async def release(self, name: str, version: str) -> dict[str, Any]:
         return await self._json(f"/pypi/{quote(name, safe='')}/{quote(version, safe='')}/json")
 
+    async def simple(self, name: str) -> dict[str, Any]:
+        """The PEP 691 project page: every version and file, yanked ones marked."""
+        return await self._json(f"/simple/{quote(name, safe='')}/", {"Accept": SIMPLE_JSON})
+
     async def top_packages(self, url: str) -> list[str]:
         """Project names from a top-pypi-packages dump, most downloaded first."""
         response = await self._http.get(url, follow_redirects=True)
@@ -93,8 +98,8 @@ class PyPIClient:
                     file.write(chunk)
         return digest.hexdigest()
 
-    async def _json(self, path: str) -> dict[str, Any]:
-        response = await self._http.get(path)
+    async def _json(self, path: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
+        response = await self._http.get(path, headers=headers)
         if response.status_code == httpx.codes.NOT_FOUND:
             raise NotReadyError(path)
         response.raise_for_status()

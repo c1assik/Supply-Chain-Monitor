@@ -15,20 +15,25 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from pypi_monitor.alerts.telegram import Alert, Notifier
 from pypi_monitor.analyzers.base import Analyzer, ReleaseContext
 from pypi_monitor.analyzers.base import Signal as FoundSignal
+from pypi_monitor.analyzers.context import owners_of
 from pypi_monitor.db.models import AnalysisRun, Artifact, Package, Release, Verdict
 from pypi_monitor.db.models import Signal as SignalRow
 from pypi_monitor.db.session import Sessions
 from pypi_monitor.domain import ArtifactType, DecidedBy, ReleaseStatus, Severity
+from pypi_monitor.github import GitHubArchives, repository_of
+from pypi_monitor.ingest.store import record_baseline
 from pypi_monitor.metrics import (
     ALERTS,
     ANALYZER_ERRORS,
     ARTIFACTS_SKIPPED,
+    BASELINES,
     VERDICT_LATENCY,
     VERDICTS,
 )
@@ -40,6 +45,8 @@ from pypi_monitor.pipeline.unpack import (
     unpack,
 )
 from pypi_monitor.pypi import NotReadyError, PyPIClient
+from pypi_monitor.pypi.client import ArtifactTooLargeError
+from pypi_monitor.pypi.versions import choose_previous
 from pypi_monitor.scoring import ScoringConfig, score_release
 from pypi_monitor.storage import ArtifactStorage
 
@@ -61,6 +68,19 @@ RESUMABLE = {
     ReleaseStatus.DOWNLOADED: Stage.ANALYZE,
     ReleaseStatus.ANALYZED: Stage.SCORE,
 }
+# Statuses of a release whose metadata snapshot was taken by us at the time of the release.
+_OBSERVED = (
+    ReleaseStatus.DOWNLOADED,
+    ReleaseStatus.ANALYZED,
+    ReleaseStatus.ALERTED,
+    ReleaseStatus.CLEAN,
+)
+
+
+@dataclass(frozen=True)
+class _Baseline:
+    id: int
+    version: str
 
 
 @dataclass(frozen=True)
@@ -87,6 +107,7 @@ class Pipeline:
         max_artifact_bytes: int,
         analyzer_timeout_s: float,
         executor: Executor | None = None,
+        github: GitHubArchives | None = None,
     ) -> None:
         self._sessions = sessions
         self._client = client
@@ -100,6 +121,7 @@ class Pipeline:
         self._analyzer_timeout_s = analyzer_timeout_s
         # CPU-bound work: run in threads it would fight for the GIL with the event loop.
         self._executor = executor
+        self._github = github
 
     async def download(self, release_id: int) -> None:
         loaded = await self._load(release_id, ReleaseStatus.QUEUED)
@@ -110,8 +132,13 @@ class Pipeline:
         # A release is announced before its first file is uploaded.
         if not data.get("urls"):
             raise NotReadyError(f"{package.name} {release.version} has no files")
-        snapshot = await self._snapshot(package.name, data)
-        artifacts = await self._fetch_artifacts(package, release, data["urls"])
+        project = await self._client.project(package.name)
+        previous = None
+        if len(project.get("releases", {})) > 1:
+            previous = await self._baseline(package, release)
+        BASELINES.labels("found" if previous else "none").inc()
+        snapshot = await self._snapshot(package, release, data, project, previous)
+        artifacts = await self._fetch_artifacts(package, release.id, release.version, data["urls"])
         uploads = [_upload_time(file) for file in data["urls"]]
 
         async with self._sessions.begin() as session:
@@ -126,21 +153,77 @@ class Pipeline:
                     pypi_metadata=snapshot,
                     serial=data.get("last_serial"),
                     published_at=min(uploads),
+                    prev_release_id=previous.id if previous else None,
                 )
             )
-        await self._queue.enqueue(Stage.ANALYZE, release_id)
+        await self._queue.enqueue(Stage.ANALYZE, release_id, priority=package.is_popular)
 
-    async def _snapshot(self, name: str, data: dict[str, Any]) -> dict[str, Any]:
-        project = await self._client.project(name)
-        uploads = [
-            _upload_time(file) for files in project.get("releases", {}).values() for file in files
+    async def _baseline(self, package: Package, release: Release) -> _Baseline | None:
+        """Find the version to diff against and make sure that its artifacts are stored.
+
+        Errors go up: the stage is retried, and PyPI answers for the old version as for the new.
+        """
+        choice = choose_previous(release.version, await self._client.simple(package.name))
+        if choice is None:
+            return None
+        version, files = choice
+        upload = min(_upload_time(file) for file in files)
+        async with self._sessions.begin() as session:
+            baseline_id = await record_baseline(session, package.id, version, upload)
+            stored = await session.scalar(
+                select(Artifact.id).where(Artifact.release_id == baseline_id).limit(1)
+            )
+        if stored is None:
+            artifacts = await self._fetch_artifacts(package, baseline_id, version, files)
+            if artifacts:
+                async with self._sessions.begin() as session:
+                    await session.execute(
+                        insert(Artifact).values(artifacts).on_conflict_do_nothing()
+                    )
+        return _Baseline(baseline_id, version)
+
+    async def _known_owners(self, package_id: int, release_id: int) -> list[str] | None:
+        async with self._sessions() as session:
+            metadata = await session.scalar(
+                select(Release.pypi_metadata)
+                .where(
+                    Release.package_id == package_id,
+                    Release.id < release_id,
+                    Release.status.in_(_OBSERVED),
+                )
+                .order_by(Release.id.desc())
+                .limit(1)
+            )
+        return None if metadata is None else sorted(owners_of(metadata.get("ownership")))
+
+    async def _snapshot(
+        self,
+        package: Package,
+        release: Release,
+        data: dict[str, Any],
+        project: dict[str, Any],
+        previous: _Baseline | None,
+    ) -> dict[str, Any]:
+        releases = project.get("releases", {})
+        uploads = [_upload_time(file) for files in releases.values() for file in files]
+        release_upload = min(_upload_time(file) for file in data["urls"])
+        earlier = [
+            upload
+            for version, files in releases.items()
+            if version != release.version
+            for upload in map(_upload_time, files)
+            if upload < release_upload
         ]
         snapshot: dict[str, Any] = {
             "info": data["info"],
             "urls": data["urls"],
             "ownership": data.get("ownership", {}),
-            "version_count": len(project.get("releases", {})),
+            "version_count": len(releases),
             "first_upload": min(uploads).isoformat() if uploads else None,
+            "release_upload": release_upload.isoformat(),
+            "last_upload": max(earlier).isoformat() if earlier else None,
+            "previous_version": previous.version if previous else None,
+            "known_owners": await self._known_owners(package.id, release.id),
         }
         if snapshot["version_count"] <= 1:
             snapshot["owner_package_counts"] = await self._owner_package_counts(data)
@@ -163,7 +246,7 @@ class Pipeline:
         return counts
 
     async def _fetch_artifacts(
-        self, package: Package, release: Release, files: list[dict[str, Any]]
+        self, package: Package, release_id: int, version: str, files: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         artifacts = []
         with tempfile.TemporaryDirectory(prefix="scm-download-") as directory:
@@ -173,11 +256,11 @@ class Pipeline:
                 sha256 = await self._client.download(file["url"], path, self._max_artifact_bytes)
                 if sha256 != file["digests"]["sha256"]:
                     raise ValueError(f"sha256 mismatch for {filename}")
-                key = f"{package.normalized_name}/{release.version}/{filename}"
+                key = f"{package.normalized_name}/{version}/{filename}"
                 await asyncio.to_thread(self._storage.put, path, key)
                 artifacts.append(
                     {
-                        "release_id": release.id,
+                        "release_id": release_id,
                         "filename": filename,
                         "type": _artifact_type(file),
                         "sha256": sha256,
@@ -196,12 +279,18 @@ class Pipeline:
             artifacts = list(
                 await session.scalars(select(Artifact).where(Artifact.release_id == release_id))
             )
+            previous_artifacts = list(
+                await session.scalars(
+                    select(Artifact).where(Artifact.release_id == release.prev_release_id)
+                )
+            )
 
         with tempfile.TemporaryDirectory(prefix="scm-analyze-") as directory:
             root = Path(directory)
-            archives, unpacked = root / "archives", root / "unpacked"
+            archives, unpacked, previous = root / "archives", root / "unpacked", root / "previous"
             archives.mkdir()
             unpacked.mkdir()
+            previous.mkdir()
             started = time.monotonic()
             unpack_signals = [
                 signal
@@ -216,11 +305,16 @@ class Pipeline:
                     _elapsed_ms(started),
                 )
             ]
+            # Its archive rules are the business of its own analysis.
+            for artifact in previous_artifacts:
+                await self._unpack(artifact, archives, previous)
             context = ReleaseContext(
                 name=package.name,
                 version=release.version,
                 metadata=release.pypi_metadata,
                 artifact_dir=unpacked if artifacts else None,
+                previous_artifact_dir=previous if previous_artifacts else None,
+                repository_dir=await self._fetch_tag(package, release, root),
             )
             runs += await asyncio.gather(*(self._run(a, context) for a in self.analyzers))
 
@@ -241,7 +335,38 @@ class Pipeline:
                 .where(Release.id == release_id)
                 .values(status=ReleaseStatus.ANALYZED)
             )
-        await self._queue.enqueue(Stage.SCORE, release_id)
+        await self._queue.enqueue(Stage.SCORE, release_id, priority=package.is_popular)
+
+    async def _fetch_tag(self, package: Package, release: Release, root: Path) -> Path | None:
+        """Unpack the source of the release tag; without it the comparison is just skipped."""
+        repository = repository_of(release.pypi_metadata.get("info", {}))
+        if self._github is None or not package.is_popular or repository is None:
+            return None
+        archive = root / "tag.tar.gz"
+        try:
+            tag = await self._github.download_tag(
+                repository,
+                package.normalized_name,
+                release.version,
+                archive,
+                self._max_artifact_bytes,
+            )
+        except (httpx.HTTPError, ArtifactTooLargeError) as e:
+            log.warning("no tag archive of %s %s: %r", package.name, release.version, e)
+            return None
+        if tag is None:
+            return None
+        directory = root / "repository"
+        target = directory / archive.name
+        target.mkdir(parents=True)
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(self._executor, unpack, archive, target, self._limits)
+        except UnsafeArchiveError as e:
+            # A cut tree would make everything after the cut look like code missing from the tag.
+            log.warning("tag archive of %s skipped: %s", package.name, e.reason)
+            return None
+        return directory
 
     async def _unpack(
         self, artifact: Artifact, archives: Path, unpacked: Path
@@ -314,7 +439,7 @@ class Pipeline:
                     .values(status=ReleaseStatus.CLEAN)
                 )
         if verdict.level in ALERT_LEVELS:
-            await self._queue.enqueue(Stage.ALERT, release_id)
+            await self._queue.enqueue(Stage.ALERT, release_id, priority=package.is_popular)
 
     async def alert(self, release_id: int) -> None:
         loaded = await self._load(release_id, ReleaseStatus.ANALYZED)
@@ -350,14 +475,15 @@ class Pipeline:
         async with self._sessions() as session:
             rows = list(
                 await session.execute(
-                    select(Release.id, Release.status)
+                    select(Release.id, Release.status, Package.is_popular)
+                    .join(Package, Package.id == Release.package_id)
                     .where(Release.status.in_(RESUMABLE), Release.created_at < threshold)
                     .order_by(Release.id)
                     .limit(limit)
                 )
             )
-        for release_id, status in rows:
-            await self._queue.enqueue(RESUMABLE[status], release_id)
+        for release_id, status, popular in rows:
+            await self._queue.enqueue(RESUMABLE[status], release_id, priority=popular)
         return len(rows)
 
     async def _load(self, release_id: int, status: ReleaseStatus) -> tuple[Release, Package] | None:

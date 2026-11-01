@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     max_unpacked_files: int = 20_000
     max_compression_ratio: int = 200
 
+    # Comparison with the release tag costs a download, so it is done for popular packages only.
+    compare_tags: bool = True
+
     metrics_port: int = 9100
 
 

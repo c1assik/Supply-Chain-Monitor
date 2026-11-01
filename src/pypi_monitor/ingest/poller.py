@@ -104,8 +104,18 @@ class Poller:
 
     async def _publish(self, release_ids: list[int], source: str) -> None:
         RELEASES_INGESTED.labels(source).inc(len(release_ids))
+        async with self._sessions() as session:
+            popular = set(
+                await session.scalars(
+                    select(Release.id)
+                    .join(Package, Package.id == Release.package_id)
+                    .where(Release.id.in_(release_ids), Package.is_popular)
+                )
+            )
         for release_id in release_ids:
-            await self._queue.enqueue(Stage.DOWNLOAD, release_id, self._settle_s)
+            await self._queue.enqueue(
+                Stage.DOWNLOAD, release_id, self._settle_s, priority=release_id in popular
+            )
 
     async def run(self, feed_interval_s: float, catchup_interval_s: float) -> None:
         next_feed = next_catchup = 0.0

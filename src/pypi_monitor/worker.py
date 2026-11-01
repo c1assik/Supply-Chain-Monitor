@@ -12,11 +12,15 @@ from arq.constants import default_queue_name
 from prometheus_client import start_http_server
 
 from pypi_monitor.alerts.telegram import LogNotifier, Notifier, TelegramNotifier
+from pypi_monitor.analyzers.consistency import ConsistencyAnalyzer
+from pypi_monitor.analyzers.context import ContextAnalyzer
+from pypi_monitor.analyzers.diff import DiffAnalyzer
 from pypi_monitor.analyzers.guarddog import GuardDogAnalyzer
 from pypi_monitor.analyzers.metadata import MetadataAnalyzer
 from pypi_monitor.db.session import create_engine, create_sessions
+from pypi_monitor.github import GitHubArchives
 from pypi_monitor.metrics import QUEUE_SIZE, STAGE_DURATION, STAGE_FAILURES, STAGE_RETRIES
-from pypi_monitor.pipeline.queue import ArqQueue, Stage
+from pypi_monitor.pipeline.queue import PRIORITY_QUEUE, ArqQueue, Stage
 from pypi_monitor.pipeline.stages import Pipeline
 from pypi_monitor.pipeline.unpack import UnpackLimits
 from pypi_monitor.pypi import PyPIClient
@@ -83,12 +87,24 @@ async def refresh_top_packages(ctx: dict[str, Any]) -> None:
 
 
 def _reload_analyzers(pipeline: Pipeline, top_packages: dict[str, int]) -> None:
-    pipeline.analyzers = [MetadataAnalyzer(top_packages), GuardDogAnalyzer()]
+    pipeline.analyzers = [
+        MetadataAnalyzer(top_packages),
+        GuardDogAnalyzer(),
+        DiffAnalyzer(),
+        ConsistencyAnalyzer(),
+        ContextAnalyzer(),
+    ]
+
+
+async def reload_top_packages(ctx: dict[str, Any]) -> None:
+    """The nightly refresh runs on the main worker; the priority worker only picks up its result."""
+    _reload_analyzers(ctx["pipeline"], await load_top_packages(ctx["sessions"]))
 
 
 async def _report_queue_size(ctx: dict[str, Any]) -> None:
+    queue = ctx.get("queue_name", default_queue_name)
     while True:
-        QUEUE_SIZE.set(await ctx["redis"].zcard(default_queue_name))
+        QUEUE_SIZE.set(await ctx["redis"].zcard(queue))
         await asyncio.sleep(QUEUE_SIZE_INTERVAL_S)
 
 
@@ -108,6 +124,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     ctx["engine"] = create_engine(settings.database_url.get_secret_value())
     ctx["sessions"] = sessions = create_sessions(ctx["engine"])
     ctx["client"] = client = PyPIClient()
+    ctx["github"] = github = GitHubArchives()
     # spawn: forking a process that already runs threads and an event loop is unsafe.
     ctx["executor"] = executor = ProcessPoolExecutor(
         settings.analyzer_processes, mp_context=multiprocessing.get_context("spawn")
@@ -133,6 +150,7 @@ async def startup(ctx: dict[str, Any]) -> None:
         max_artifact_bytes=settings.max_artifact_bytes,
         analyzer_timeout_s=settings.analyzer_timeout_s,
         executor=executor,
+        github=github if settings.compare_tags else None,
     )
     ctx["queue_size_task"] = asyncio.create_task(_report_queue_size(ctx))
     top_packages = await load_top_packages(sessions)
@@ -149,6 +167,7 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     ctx["queue_size_task"].cancel()
     ctx["executor"].shutdown(cancel_futures=True)
     await ctx["client"].aclose()
+    await ctx["github"].aclose()
     await ctx["engine"].dispose()
 
 
@@ -167,3 +186,13 @@ class WorkerSettings:
     job_timeout = STAGE_TIMEOUT_S + 60
     # Job ids must stay reusable: the sweeper requeues under the same id.
     keep_result = 0
+
+
+def priority_worker_options() -> dict[str, Any]:
+    """Overrides of `WorkerSettings` for the worker of popular packages."""
+    return {
+        "queue_name": PRIORITY_QUEUE,
+        "ctx": {"queue_name": PRIORITY_QUEUE},
+        # Sweeping and the top list stay on the main worker: arq would run a cron job only once.
+        "cron_jobs": [cron(reload_top_packages, hour={3}, minute={47}, timeout=60)],
+    }

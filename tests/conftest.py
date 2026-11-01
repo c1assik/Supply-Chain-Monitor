@@ -23,10 +23,15 @@ os.environ.setdefault("SCM_S3_SECRET_KEY", "unused")
 class FakeQueue:
     def __init__(self) -> None:
         self.jobs: list[tuple[Stage, int]] = []
+        self.priority: set[tuple[Stage, int]] = set()
 
-    async def enqueue(self, stage: Stage, release_id: int, defer_s: float | None = None) -> None:
+    async def enqueue(
+        self, stage: Stage, release_id: int, defer_s: float | None = None, *, priority: bool = False
+    ) -> None:
         if (stage, release_id) not in self.jobs:
             self.jobs.append((stage, release_id))
+        if priority:
+            self.priority.add((stage, release_id))
 
 
 class FakeStorage:

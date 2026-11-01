@@ -31,6 +31,8 @@ class ReleaseContext(BaseModel):
     metadata: Mapping[str, Any] = Field(default_factory=dict)
     artifact_dir: Path | None = None
     previous_artifact_dir: Path | None = None
+    # Source of the release tag, in the same layout: `<repository_dir>/<archive>/<root>/...`.
+    repository_dir: Path | None = None
 
 
 class Analyzer(ABC):
