@@ -19,6 +19,8 @@ class ReleaseStatus(StrEnum):
     ALERTED = "alerted"
     CLEAN = "clean"
     FAILED = "failed"
+    # Known only as the base of a diff: never analyzed, and no verdict of its own.
+    BASELINE = "baseline"
 
 
 class ArtifactType(StrEnum):

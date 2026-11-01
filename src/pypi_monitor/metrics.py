@@ -29,4 +29,5 @@ VERDICT_LATENCY = Histogram(
     buckets=_LATENCY_BUCKETS,
 )
 VERDICTS = Counter("scm_verdicts_total", "Automatic verdicts", ["level"])
+BASELINES = Counter("scm_baselines_total", "Releases by the base of their diff", ["outcome"])
 ALERTS = Counter("scm_alerts_total", "Sent alerts", ["level"])

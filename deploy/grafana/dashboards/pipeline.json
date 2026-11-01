@@ -63,7 +63,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(scm_queue_size)",
+          "expr": "sum(scm_queue_size)",
           "legendFormat": "jobs",
           "datasource": {
             "type": "prometheus",

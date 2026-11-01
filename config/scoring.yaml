@@ -8,7 +8,20 @@ severity_weights:
   critical: 60
 
 # Переопределение веса для конкретных правил: rule_id: вес.
-rule_weights: {}
+rule_weights:
+  # Обычная разработка: новые модули, зависимости и адреса. Сами по себе они не добавляют риска и
+  # нужны как улики в карточке релиза и как части комбинаций ниже.
+  diff.file.new_python: 0
+  diff.new_import: 0
+  diff.new_url: 0
+  # Новый опасный вызов внутри функции сам ещё ни о чём не говорит.
+  diff.new_dangerous_call: 5
+  # Вендоринг, тесты и прочее, что не устанавливается: только улики.
+  noise.diff.file.new_python: 0
+  noise.diff.new_dangerous_call: 0
+  noise.diff.new_import: 0
+  noise.diff.new_ip: 0
+  noise.diff.new_url: 0
 
 # Комбинации правил дают бонус к сумме. В rules можно использовать шаблоны с *.
 # guarddog.install.* — находки в коде, который исполняется при установке или импорте.
@@ -21,6 +34,28 @@ combos:
     bonus: 10
   - rules: [guarddog.capability-process-hooks, guarddog.install.threat-*]
     bonus: 20
+  # Дифф: новый код становится подозрительным в связке, по отдельности это обычное обновление.
+  # diff.install.* — изменения в коде, который исполняется при установке или импорте.
+  - rules: [diff.install.new_dangerous_call, diff.install.new_import]
+    bonus: 20
+  - rules: [diff.install.new_dangerous_call, diff.install.new_url]
+    bonus: 20
+  - rules: [diff.install.new_dangerous_call, diff.install.new_ip]
+    bonus: 20
+  - rules: [diff.*new_dangerous_call, diff.*new_ip]
+    bonus: 25
+  # Код не из источника плюс новые опасные вызовы: так выглядит подмена при публикации.
+  - rules: [consistency.*, diff.*new_dangerous_call]
+    bonus: 30
+  # Контекст: захваченный аккаунт или заброшенный пакет плюс опасные изменения.
+  - rules: [context.owners_replaced, diff.*new_dangerous_call]
+    bonus: 25
+  - rules: [context.owner_added, diff.*new_dangerous_call]
+    bonus: 15
+  - rules: [context.dormant_release, diff.install.*]
+    bonus: 15
+  - rules: [context.version_jump, diff.install.*]
+    bonus: 10
 
 # Подавление известных ложных срабатываний.
 allowlist:

@@ -69,6 +69,19 @@ async def test_repeated_polls_do_not_duplicate_releases(
         assert await session.scalar(select(func.count()).select_from(Package)) == 1
 
 
+async def test_popular_packages_go_to_the_priority_queue(
+    poller: Poller, pypi: FakePyPI, sessions: Sessions, queue: FakeQueue
+) -> None:
+    async with sessions.begin() as session:
+        session.add(Package(name="top", normalized_name="top", is_popular=True))
+    pypi.feeds[UPDATES_FEED] = [FeedEntry("top", "1.0", NOW), FeedEntry("rare", "1.0", NOW)]
+
+    await poller.poll_feeds()
+
+    assert len(queue.jobs) == 2
+    assert len(queue.priority) == 1
+
+
 async def test_packages_feed_resolves_the_version(
     poller: Poller, pypi: FakePyPI, sessions: Sessions
 ) -> None:

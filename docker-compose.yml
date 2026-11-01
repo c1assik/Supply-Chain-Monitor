@@ -4,7 +4,7 @@ name: scm
 x-app: &app
   build: .
   restart: unless-stopped
-  environment:
+  environment: &app-environment
     SCM_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-scm}:${POSTGRES_PASSWORD:?задайте в .env}@postgres:5432/${POSTGRES_DB:-scm}
     SCM_REDIS_URL: redis://:${REDIS_PASSWORD:?задайте в .env}@redis:6379/0
     SCM_S3_ENDPOINT: http://s3:8333
@@ -92,6 +92,16 @@ services:
   worker:
     <<: *app
     command: ["worker"]
+    depends_on: *app-dependencies
+
+  # Популярные пакеты: своя очередь, чтобы поток обычных релизов не задерживал их вердикт.
+  worker-priority:
+    <<: *app
+    command: ["priority-worker"]
+    environment:
+      <<: *app-environment
+      SCM_WORKER_MAX_JOBS: "4"
+      SCM_ANALYZER_PROCESSES: "2"
     depends_on: *app-dependencies
 
   prometheus:

@@ -61,7 +61,7 @@ select = ["E", "F", "W", "I", "UP", "B", "S", "C4", "SIM", "RUF"]
 
 [tool.mypy]
 strict = true
-files = ["src", "tests", "migrations"]
+files = ["src", "tests", "migrations", "benchmarks"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
