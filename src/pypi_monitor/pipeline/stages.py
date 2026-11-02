@@ -108,6 +108,7 @@ class Pipeline:
         analyzer_timeout_s: float,
         executor: Executor | None = None,
         github: GitHubArchives | None = None,
+        dashboard_url: str | None = None,
     ) -> None:
         self._sessions = sessions
         self._client = client
@@ -122,6 +123,7 @@ class Pipeline:
         # CPU-bound work: run in threads it would fight for the GIL with the event loop.
         self._executor = executor
         self._github = github
+        self._dashboard_url = dashboard_url.rstrip("/") if dashboard_url else None
 
     async def download(self, release_id: int) -> None:
         loaded = await self._load(release_id, ReleaseStatus.QUEUED)
@@ -454,8 +456,9 @@ class Pipeline:
         top = score_release(
             signals, self._scoring, package.normalized_name, package.is_popular
         ).top_signals
+        link = f"{self._dashboard_url}/releases/{release_id}/diff" if self._dashboard_url else None
         await self._notifier.send(
-            Alert(package.name, release.version, verdict.score, verdict.level, top)
+            Alert(package.name, release.version, verdict.score, verdict.level, top, link)
         )
         async with self._sessions.begin() as session:
             await session.execute(

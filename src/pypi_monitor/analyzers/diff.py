@@ -81,7 +81,7 @@ class _Baseline:
 
 class DiffAnalyzer(Analyzer):
     name: ClassVar[str] = "diff"
-    version: ClassVar[str] = "1"
+    version: ClassVar[str] = "2"
 
     def analyze(self, release: ReleaseContext) -> list[Signal]:
         if release.artifact_dir is None or release.previous_artifact_dir is None:
@@ -91,11 +91,19 @@ class DiffAnalyzer(Analyzer):
         known_versions = {release.version, release.metadata.get("previous_version")}
         reader = CodeReader({version for version in known_versions if version})
         signals: list[Signal] = []
-        for kind in current.keys() & previous.keys():
+        common = current.keys() & previous.keys()
+        for kind in common:
             installed = None
             if kind == SDIST:
                 installed = installed_paths(current[SDIST], current.get(WHEEL))
             signals += _diff(previous[kind], current[kind], reader, installed)
+        if not common and current and previous:
+            # A change of format must not switch the diff off: a wheel uploaded to a project that
+            # only had sdists is compared with them. Paths may differ, and facts are not bound to
+            # paths, so moved code stays known.
+            old = next(iter(previous.values()))
+            for tree in current.values():
+                signals += _diff(old, tree, reader, None)
         return _limited(signals)
 
 

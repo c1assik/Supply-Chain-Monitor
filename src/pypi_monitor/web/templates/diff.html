@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Дифф {{ card.package.name }} {{ card.release.version }}{% endblock %}
+{% block content %}
+<h1><a href="/releases/{{ card.release.id }}">{{ card.package.name }} {{ card.release.version }}</a></h1>
+<p>
+  {% if card.previous_version %}Сравнение с {{ card.previous_version }}{% else %}Предыдущей версии нет: показаны все файлы{% endif %}{% if diff.kind %}, {{ diff.kind }}{% endif %}.
+  Файлов: {{ diff.files | length }}. Код показан как текст и не запускается.
+</p>
+{% for warning in diff.warnings %}<p class="warning">{{ warning }}</p>{% endfor %}
+{% for file in diff.files %}
+<details class="file" {{ "open" if file.autorun or loop.index <= 20 }}>
+  <summary>
+    <span class="tag {{ file.status.value }}">{{ file.status.value }}</span>
+    <code>{{ file.path }}</code>
+    {% if file.autorun %}<span class="tag autorun">автозапуск</span>{% endif %}
+  </summary>
+  {% if file.note %}<p class="muted">{{ file.note }}</p>{% endif %}
+  {% if file.lines %}<pre class="diff">{% for line in file.lines %}<span class="{{ 'add' if line.startswith('+') else 'del' if line.startswith('-') else 'hunk' if line.startswith('@@') else 'ctx' }}">{{ line }}
+</span>{% endfor %}</pre>{% endif %}
+</details>
+{% else %}
+<p class="empty">Различий в файлах нет.</p>
+{% endfor %}
+{% endblock %}

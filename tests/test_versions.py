@@ -1,5 +1,8 @@
 from typing import Any
 
+import httpx
+
+from pypi_monitor.pypi import PyPIClient
 from pypi_monitor.pypi.versions import choose_previous
 
 
@@ -72,3 +75,18 @@ def test_files_are_described_like_in_the_json_api() -> None:
     assert wheel["packagetype"] == "bdist_wheel"
     assert wheel["digests"] == {"sha256": "ab"}
     assert wheel["upload_time_iso_8601"] == "2026-03-19T14:22:25.026315Z"
+
+
+async def test_project_page_is_requested_by_the_normalized_name() -> None:
+    """PyPI redirects other spellings, and a release of `PyYAML` must not fail on that."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/simple/zc-buildout/":
+            return httpx.Response(200, json={"files": []})
+        return httpx.Response(301, headers={"Location": "/simple/zc-buildout/"})
+
+    client = PyPIClient(httpx.MockTransport(handler))
+    try:
+        assert await client.simple("zc.Buildout") == {"files": []}
+    finally:
+        await client.aclose()

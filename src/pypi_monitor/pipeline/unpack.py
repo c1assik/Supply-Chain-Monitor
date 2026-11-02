@@ -69,8 +69,13 @@ class _LimitedReader(io.RawIOBase):
         return len(data)
 
 
-def unpack(archive: Path, target: Path, limits: UnpackLimits) -> None:
-    """Unpack `archive` into the empty directory `target`, or raise."""
+def unpack(
+    archive: Path, target: Path, limits: UnpackLimits, password: bytes | None = None
+) -> None:
+    """Unpack `archive` into the empty directory `target`, or raise.
+
+    `password` opens encrypted zip archives, as malware datasets are distributed.
+    """
     # A bomb is mostly recognized by its ratio, long before the absolute limit is reached.
     max_bytes = min(limits.max_bytes, archive.stat().st_size * limits.max_ratio + 1024 * 1024)
     name = archive.name.lower()
@@ -79,7 +84,7 @@ def unpack(archive: Path, target: Path, limits: UnpackLimits) -> None:
             _unpack_tar(opener(archive), target, max_bytes, limits.max_files)
             return
     if name.endswith(_ZIP_SUFFIXES):
-        _unpack_zip(archive, target, max_bytes, limits.max_files)
+        _unpack_zip(archive, target, max_bytes, limits.max_files, password)
         return
     raise UnsupportedArchiveError(archive.name)
 
@@ -103,7 +108,9 @@ def _unpack_tar(stream: IO[bytes], target: Path, max_bytes: int, max_files: int)
         raise UnsafeArchiveError("corrupt", str(e)) from e
 
 
-def _unpack_zip(archive: Path, target: Path, max_bytes: int, max_files: int) -> None:
+def _unpack_zip(
+    archive: Path, target: Path, max_bytes: int, max_files: int, password: bytes | None
+) -> None:
     budget = _Budget(max_bytes, max_files)
     try:
         with zipfile.ZipFile(archive) as zip_file:
@@ -116,7 +123,7 @@ def _unpack_zip(archive: Path, target: Path, max_bytes: int, max_files: int) -> 
                 if info.is_dir():
                     destination.mkdir(parents=True, exist_ok=True)
                     continue
-                with zip_file.open(info) as source:
+                with zip_file.open(info, pwd=password) as source:
                     _copy(source, destination, budget)
     except (zipfile.BadZipFile, EOFError, OSError, ValueError, NotImplementedError) as e:
         raise UnsafeArchiveError("corrupt", str(e)) from e

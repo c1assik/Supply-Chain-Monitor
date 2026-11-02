@@ -52,10 +52,19 @@ class GuardDogAnalyzer(Analyzer):
     def analyze(self, release: ReleaseContext) -> list[Signal]:
         if release.artifact_dir is None:
             raise ValueError("no unpacked artifact to scan")
-        report = _scanner().scan_local(str(release.artifact_dir))
-        if report.get("errors"):
-            log.warning("GuardDog rule errors on %s: %s", release.name, report["errors"])
-        return normalize_results(report["results"], self._rules, release.artifact_dir)
+        return self.normalize(scan(release.artifact_dir), release.artifact_dir)
+
+    def normalize(self, results: dict[str, Any], artifact_dir: Path) -> list[Signal]:
+        return normalize_results(results, self._rules, artifact_dir)
+
+
+def scan(artifact_dir: Path) -> dict[str, Any]:
+    """Raw GuardDog findings by rule; the benchmark also needs them as they are."""
+    report = _scanner().scan_local(str(artifact_dir))
+    if report.get("errors"):
+        log.warning("GuardDog rule errors on %s: %s", artifact_dir, report["errors"])
+    results: dict[str, Any] = report["results"]
+    return results
 
 
 def normalize_results(

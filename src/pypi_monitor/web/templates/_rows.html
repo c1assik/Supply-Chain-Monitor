@@ -1,0 +1,25 @@
+{% if feed.rows %}
+<table class="feed">
+  <thead>
+    <tr><th>Скор</th><th>Пакет</th><th>Версия</th><th>Статус</th><th>Разметка</th><th>Время (UTC)</th></tr>
+  </thead>
+  <tbody>
+  {% for row in feed.rows %}
+    <tr>
+      <td><span class="level {{ row.level.value }}">{{ row.level.value }} {{ row.score }}</span></td>
+      <td><a href="/releases/{{ row.release_id }}">{{ row.name }}</a>{% if row.popular %} <span class="tag">топ</span>{% endif %}</td>
+      <td>{{ row.version }}</td>
+      <td>{{ row.status.value }}</td>
+      <td>{% if row.label %}<span class="label {{ row.label.value }}">{{ row.label.value }}</span>{% endif %}</td>
+      <td>{{ row.decided_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">Под фильтры ничего не подходит.</p>
+{% endif %}
+<nav class="pages">
+  {% if page > 1 %}<a href="/?level={{ level.value }}&amp;label={{ label.value }}&amp;q={{ q | urlencode }}&amp;page={{ page - 1 }}">← Новее</a>{% endif %}
+  {% if feed.has_more %}<a href="/?level={{ level.value }}&amp;label={{ label.value }}&amp;q={{ q | urlencode }}&amp;page={{ page + 1 }}">Старее →</a>{% endif %}
+</nav>

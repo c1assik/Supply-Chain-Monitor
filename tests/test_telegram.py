@@ -38,6 +38,21 @@ def test_untrusted_text_is_escaped() -> None:
     assert "&lt;/pre&gt;" in text
 
 
+def test_alert_links_to_the_diff_when_the_dashboard_is_known() -> None:
+    plain = alert()
+    linked = Alert(
+        plain.package,
+        plain.version,
+        plain.score,
+        plain.level,
+        plain.signals,
+        "http://localhost:8000/releases/7/diff",
+    )
+
+    assert "/releases/7/diff" in format_alert(linked)
+    assert "Дифф" not in format_alert(plain)
+
+
 def test_longest_alert_fits_telegram_limit() -> None:
     signals = alert("<" * 100_000).signals * 3
 

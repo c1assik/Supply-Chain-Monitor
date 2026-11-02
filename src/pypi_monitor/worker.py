@@ -151,6 +151,7 @@ async def startup(ctx: dict[str, Any]) -> None:
         analyzer_timeout_s=settings.analyzer_timeout_s,
         executor=executor,
         github=github if settings.compare_tags else None,
+        dashboard_url=settings.dashboard_url,
     )
     ctx["queue_size_task"] = asyncio.create_task(_report_queue_size(ctx))
     top_packages = await load_top_packages(sessions)
