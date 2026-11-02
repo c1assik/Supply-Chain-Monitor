@@ -53,7 +53,7 @@ async def run_report(name: str, version: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="pypi-monitor")
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("poller", "worker", "priority-worker", "sync-top"):
+    for command in ("poller", "worker", "priority-worker", "sync-top", "dashboard"):
         commands.add_parser(command)
     report = commands.add_parser("report", help="what is known about a release")
     report.add_argument("package")
@@ -68,6 +68,15 @@ def main() -> None:
         asyncio.run(run_sync_top())
     elif command == "report":
         asyncio.run(run_report(arguments.package, arguments.version))
+    elif command == "dashboard":
+        import uvicorn
+
+        from pypi_monitor.web.app import app_from_settings
+
+        settings = get_settings()
+        uvicorn.run(
+            app_from_settings(settings), host=settings.dashboard_host, port=settings.dashboard_port
+        )
     else:
         from pypi_monitor.worker import WorkerSettings, priority_worker_options
 

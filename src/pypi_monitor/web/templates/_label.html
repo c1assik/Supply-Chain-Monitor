@@ -1,0 +1,20 @@
+<section id="labels">
+  <h2>Разметка</h2>
+  {% if card.verdict %}
+  <form hx-post="/releases/{{ card.release.id }}/label" hx-target="#labels" hx-swap="outerHTML">
+    <textarea name="comment" rows="2" maxlength="2000" placeholder="Комментарий"></textarea>
+    <div class="buttons">
+      <button name="label" value="malicious" class="malicious">Вредоносный</button>
+      <button name="label" value="benign" class="benign">Безопасный</button>
+    </div>
+  </form>
+  {% else %}
+  <p class="empty">У релиза ещё нет вердикта.</p>
+  {% endif %}
+  {% for verdict in card.labels %}
+  <p class="history">
+    <span class="label {{ verdict.label.value }}">{{ verdict.label.value }}</span>
+    {{ verdict.created_at.strftime("%Y-%m-%d %H:%M") }}{% if verdict.comment %}: {{ verdict.comment }}{% endif %}
+  </p>
+  {% endfor %}
+</section>

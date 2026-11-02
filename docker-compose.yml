@@ -13,6 +13,7 @@ x-app: &app
     SCM_S3_BUCKET: ${S3_BUCKET:-artifacts}
     SCM_TELEGRAM_TOKEN: ${SCM_TELEGRAM_TOKEN:-}
     SCM_TELEGRAM_CHAT_ID: ${SCM_TELEGRAM_CHAT_ID:-}
+    SCM_DASHBOARD_URL: ${SCM_DASHBOARD_URL:-http://localhost:8000}
   cap_drop:
     - ALL
   security_opt:
@@ -102,6 +103,17 @@ services:
       <<: *app-environment
       SCM_WORKER_MAX_JOBS: "4"
       SCM_ANALYZER_PROCESSES: "2"
+    depends_on: *app-dependencies
+
+  # Без авторизации: доступен только с этой машины, снаружи — через туннель.
+  dashboard:
+    <<: *app
+    command: ["dashboard"]
+    environment:
+      <<: *app-environment
+      SCM_DASHBOARD_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8000:8000"
     depends_on: *app-dependencies
 
   prometheus:

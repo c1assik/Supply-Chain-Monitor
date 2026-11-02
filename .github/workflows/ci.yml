@@ -39,6 +39,25 @@ jobs:
       - run: mypy
       - run: pytest
 
+  # Reads live malware as data: nothing from the corpus is installed, imported or executed.
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install -e . --group dev
+      - uses: actions/cache@v5
+        with:
+          path: |
+            .benchmark/dataset
+            .benchmark/negatives
+          key: benchmark-corpus-${{ hashFiles('benchmarks/corpus.py', 'benchmarks/data/negatives.json') }}
+      - run: python -m benchmarks.malware scan --negatives 300
+      - run: python -m benchmarks.malware report --check --output "$GITHUB_STEP_SUMMARY"
+
   compose:
     runs-on: ubuntu-latest
     steps:

@@ -28,6 +28,7 @@ class Alert:
     score: int
     level: Severity
     signals: list[Signal]
+    dashboard_url: str | None = None
 
 
 class Notifier(Protocol):
@@ -42,6 +43,8 @@ def format_alert(alert: Alert) -> str:
         f'<a href="https://pypi.org/project/{package}/{version}/">PyPI</a> · '
         f'<a href="https://inspector.pypi.io/project/{package}/{version}/">Inspector</a>',
     ]
+    if alert.dashboard_url:
+        lines[-1] += f' · <a href="{html.escape(alert.dashboard_url)}">Дифф</a>'
     for signal in alert.signals:
         location = signal.file_path or ""
         if location and signal.line:

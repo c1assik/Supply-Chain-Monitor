@@ -13,17 +13,21 @@ dependencies = [
     "arq>=0.28",
     "boto3>=1.43",
     "defusedxml>=0.7",
+    "fastapi>=0.162",
     # Rules decide the results, so the version is pinned and is part of analyzer_version.
     "guarddog==3.2.0",
     "httpx>=0.28",
+    "jinja2>=3.1",
     "packaging>=26.3",
     "prometheus-client>=0.22",
     "psycopg[binary]>=3.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.6",
+    "python-multipart>=0.0.20",
     "pyyaml>=6.0",
     "rapidfuzz>=3.13",
     "sqlalchemy[asyncio]>=2.0",
+    "uvicorn>=0.54",
 ]
 
 [project.scripts]

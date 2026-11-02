@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Лента вердиктов</h1>
+<form class="filters" hx-get="/" hx-target="#rows" hx-push-url="true"
+      hx-trigger="change, input from:input[name=q] delay:300ms">
+  <label>Уровень
+    <select name="level">
+      <option value="alerts" {{ "selected" if level == "alerts" }}>High и Critical</option>
+      <option value="medium" {{ "selected" if level == "medium" }}>Medium и выше</option>
+    </select>
+  </label>
+  <label>Разметка
+    <select name="label">
+      <option value="none" {{ "selected" if label == "none" }}>Не размечено</option>
+      <option value="any" {{ "selected" if label == "any" }}>Все</option>
+      <option value="malicious" {{ "selected" if label == "malicious" }}>Вредоносные</option>
+      <option value="benign" {{ "selected" if label == "benign" }}>Безопасные</option>
+    </select>
+  </label>
+  <label>Пакет <input type="search" name="q" value="{{ q }}" autocomplete="off"></label>
+</form>
+<div id="rows">{% include "_rows.html" %}</div>
+{% endblock %}

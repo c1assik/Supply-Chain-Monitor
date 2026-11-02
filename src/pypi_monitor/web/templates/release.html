@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ card.package.name }} {{ card.release.version }}{% endblock %}
+{% block content %}
+<h1>{{ card.package.name }} <span class="version">{{ card.release.version }}</span></h1>
+<p class="summary">
+  {% if card.verdict %}<span class="level {{ card.verdict.level.value }}">{{ card.verdict.level.value }} {{ card.verdict.score }}/100</span>{% endif %}
+  <span class="tag">{{ card.release.status.value }}</span>
+  {% if card.package.is_popular %}<span class="tag">топ-{{ card.package.downloads_rank }}</span>{% endif %}
+</p>
+<ul class="links">
+  <li><a href="/releases/{{ card.release.id }}/diff">{% if card.previous_version %}Дифф с {{ card.previous_version }}{% else %}Файлы релиза{% endif %}</a></li>
+  <li><a href="https://pypi.org/project/{{ card.package.normalized_name | urlencode }}/{{ card.release.version | urlencode }}/" rel="noreferrer noopener" target="_blank">PyPI</a></li>
+  <li><a href="https://inspector.pypi.io/project/{{ card.package.normalized_name | urlencode }}/{{ card.release.version | urlencode }}/" rel="noreferrer noopener" target="_blank">Inspector</a></li>
+  <li><a href="/releases/{{ card.release.id }}/report">Репорт в PyPI</a></li>
+</ul>
+<p>Владельцы: {{ card.release.maintainers | join(", ") or "неизвестны" }}</p>
+{% for run in card.failed_runs %}
+<p class="warning">Анализатор {{ run.analyzer }} не отработал, вердикт неполный: {{ run.error }}</p>
+{% endfor %}
+{% include "_label.html" %}
+<h2>Сигналы: {{ card.signals | length }}</h2>
+{% for signal in card.signals %}
+<details class="signal" {{ "open" if loop.index <= 5 }}>
+  <summary>
+    <span class="level {{ signal.severity.value }}">{{ signal.severity.value }}</span>
+    <code>{{ signal.rule_id }}</code>
+    <span class="muted">{{ "%.2f" | format(signal.confidence) }} · {{ signal.analyzer }}{% if signal.location %} · {{ signal.location }}{% endif %}</span>
+  </summary>
+  <pre>{{ signal.evidence }}</pre>
+</details>
+{% else %}
+<p class="empty">Сигналов нет.</p>
+{% endfor %}
+{% endblock %}

@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 import httpx
+from packaging.utils import canonicalize_name
 
 from pypi_monitor import __version__
 from pypi_monitor.pypi.feeds import ChangelogEvent, FeedEntry, parse_changelog, parse_feed
@@ -72,8 +73,12 @@ class PyPIClient:
         return await self._json(f"/pypi/{quote(name, safe='')}/{quote(version, safe='')}/json")
 
     async def simple(self, name: str) -> dict[str, Any]:
-        """The PEP 691 project page: every version and file, yanked ones marked."""
-        return await self._json(f"/simple/{quote(name, safe='')}/", {"Accept": SIMPLE_JSON})
+        """The PEP 691 project page: every version and file, yanked ones marked.
+
+        Only the normalized name is served: any other spelling gets a redirect.
+        """
+        path = f"/simple/{quote(canonicalize_name(name), safe='')}/"
+        return await self._json(path, {"Accept": SIMPLE_JSON})
 
     async def top_packages(self, url: str) -> list[str]:
         """Project names from a top-pypi-packages dump, most downloaded first."""

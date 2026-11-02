@@ -37,6 +37,8 @@ def alembic_config() -> Iterator[Config]:
     command.downgrade(config, "base")
     yield config
     command.downgrade(config, "base")
+    # Other test modules share this database and expect the schema to be there.
+    command.upgrade(config, "head")
 
 
 @pytest.fixture

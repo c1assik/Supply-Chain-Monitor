@@ -22,6 +22,87 @@ rule_weights:
   noise.diff.new_import: 0
   noise.diff.new_ip: 0
   noise.diff.new_url: 0
+  # Подобрано на train: python -m benchmarks.tune. Вручную не править.
+  # Вес правила, не встречавшегося при подборе, берётся из severity_weights.
+  guarddog.capability-filesystem-browser: 11
+  guarddog.capability-process-hooks: 75
+  guarddog.install.threat-filesystem-read: 18
+  guarddog.install.threat-network-exfil-messenger: 56
+  guarddog.install.threat-network-exfil-sysinfo: 56
+  guarddog.install.threat-network-exfiltration: 72
+  guarddog.install.threat-network-outbound-shady-links: 56
+  guarddog.install.threat-network-reverse-shell: 56
+  guarddog.install.threat-process-cryptomining: 9
+  guarddog.install.threat-process-download-exec: 45
+  guarddog.install.threat-process-hooks: 2
+  guarddog.install.threat-process-powershell-encoded: 56
+  guarddog.install.threat-process-spawn-silent: 100
+  guarddog.install.threat-runtime-dynamic-loader: 1
+  guarddog.install.threat-runtime-obfuscation: 72
+  guarddog.install.threat-runtime-obfuscation-base64exec: 72
+  guarddog.install.threat-runtime-obfuscation-chr: 56
+  guarddog.install.threat-runtime-obfuscation-general: 72
+  guarddog.install.threat-runtime-obfuscation-import-exec: 56
+  guarddog.install.threat-runtime-obfuscation-steganography: 5
+  guarddog.install.threat-runtime-system-info: 100
+  guarddog.install.threat-setup-import-aliasing: 56
+  guarddog.install.threat-setup-network-in-install: 8
+  guarddog.install.threat-setup-suspicious-imports: 27
+  guarddog.threat-network-exfil-messenger: 20
+  guarddog.threat-network-exfil-sysinfo: 51
+  guarddog.threat-network-exfiltration: 13
+  guarddog.threat-network-outbound-shady-links: 39
+  guarddog.threat-process-cryptomining: 2
+  guarddog.threat-runtime-obfuscation-base64exec: 10
+  guarddog.threat-runtime-obfuscation-chr: 2
+  guarddog.threat-runtime-obfuscation-general: 2
+  guarddog.threat-runtime-screencapture: 2
+  guarddog.threat-runtime-system-info: 10
+  metadata.empty_readme: 14
+  metadata.foreign_repository: 14
+  metadata.no_repository: 14
+  metadata.typosquat: 14
+  # Ноль: в обычных пакетах встречаются не реже, чем в малвари.
+  guarddog.capability-filesystem-delete: 0
+  guarddog.capability-filesystem-read: 0
+  guarddog.capability-filesystem-write-executable: 0
+  guarddog.capability-network-download: 0
+  guarddog.capability-network-lolbas: 0
+  guarddog.capability-network-outbound: 0
+  guarddog.capability-process-schedule: 0
+  guarddog.capability-process-spawn: 0
+  guarddog.capability-runtime-clipboard: 0
+  guarddog.install.threat-process-memory: 0
+  guarddog.install.threat-process-sysinfo: 0
+  guarddog.install.threat-runtime-enumeration: 0
+  guarddog.install.threat-runtime-environment-read: 0
+  guarddog.install.threat-runtime-keylogging: 0
+  guarddog.install.threat-runtime-obfuscation-unicode: 0
+  guarddog.install.threat-runtime-screencapture: 0
+  guarddog.threat-filesystem-autostart: 0
+  guarddog.threat-filesystem-destruction: 0
+  guarddog.threat-filesystem-read: 0
+  guarddog.threat-network-dns-exfil: 0
+  guarddog.threat-network-reverse-shell: 0
+  guarddog.threat-npm-http-dependency: 0
+  guarddog.threat-process-download-exec: 0
+  guarddog.threat-process-hooks: 0
+  guarddog.threat-process-injection-dll: 0
+  guarddog.threat-process-memory: 0
+  guarddog.threat-process-spawn-silent: 0
+  guarddog.threat-process-sysinfo: 0
+  guarddog.threat-runtime-dynamic-loader: 0
+  guarddog.threat-runtime-enumeration: 0
+  guarddog.threat-runtime-environment-read: 0
+  guarddog.threat-runtime-keylogging: 0
+  guarddog.threat-runtime-obfuscation: 0
+  guarddog.threat-runtime-obfuscation-api: 0
+  guarddog.threat-runtime-obfuscation-dynamic-eval: 0
+  guarddog.threat-runtime-obfuscation-import-exec: 0
+  guarddog.threat-runtime-obfuscation-log-suppress: 0
+  guarddog.threat-runtime-obfuscation-pyarmor: 0
+  guarddog.threat-runtime-obfuscation-steganography: 0
+  guarddog.threat-runtime-obfuscation-unicode: 0
 
 # Комбинации правил дают бонус к сумме. В rules можно использовать шаблоны с *.
 # guarddog.install.* — находки в коде, который исполняется при установке или импорте.
@@ -29,11 +110,11 @@ combos:
   - rules: [metadata.typosquat, metadata.new_package]
     bonus: 20
   - rules: [metadata.typosquat, guarddog.*threat-*]
-    bonus: 30
+    bonus: 17
   - rules: [metadata.new_package, guarddog.install.threat-*]
     bonus: 10
   - rules: [guarddog.capability-process-hooks, guarddog.install.threat-*]
-    bonus: 20
+    bonus: 18
   # Дифф: новый код становится подозрительным в связке, по отдельности это обычное обновление.
   # diff.install.* — изменения в коде, который исполняется при установке или импорте.
   - rules: [diff.install.new_dangerous_call, diff.install.new_import]

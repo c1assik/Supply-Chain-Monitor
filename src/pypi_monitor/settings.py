@@ -47,6 +47,13 @@ class Settings(BaseSettings):
 
     metrics_port: int = 9100
 
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8000
+    # What the Host header may say: a page on any other name must not reach the dashboard.
+    dashboard_allowed_hosts: list[str] = ["localhost", "127.0.0.1"]
+    # Public address for links in alerts; without it alerts have none.
+    dashboard_url: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

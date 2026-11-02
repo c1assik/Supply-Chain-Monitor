@@ -5,8 +5,11 @@ repos:
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
+      # Vendored files stay byte for byte as released.
       - id: end-of-file-fixer
+        exclude: ^src/pypi_monitor/web/static/htmx\.min\.js$
       - id: trailing-whitespace
+        exclude: ^src/pypi_monitor/web/static/htmx\.min\.js$
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.3
     hooks:

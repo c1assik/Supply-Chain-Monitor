@@ -7,3 +7,5 @@ __pycache__/
 build/
 dist/
 .env
+# Live malware for the benchmark: read as data, never installed or imported.
+.benchmark/

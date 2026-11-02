@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Репорт {{ card.package.name }} {{ card.release.version }}{% endblock %}
+{% block content %}
+<h1><a href="/releases/{{ card.release.id }}">{{ card.package.name }} {{ card.release.version }}</a></h1>
+{% if not card.label or card.label.value != "malicious" %}
+<p class="warning">Релиз не размечен как вредоносный. Сначала проверьте его вручную: автоматический вердикт не повод для репорта.</p>
+{% endif %}
+<ol>
+  <li>Проверьте текст и опишите, что делает код. Для пакетов популярных проектов сначала напишите мейнтейнерам.</li>
+  <li>Отправьте его через <a href="https://pypi.org/project/{{ card.package.normalized_name | urlencode }}/" rel="noreferrer noopener" target="_blank">Report project as malware</a> на странице проекта (нужен вход в аккаунт PyPI).</li>
+  <li>Не публикуйте находку до реакции PyPI.</li>
+</ol>
+<textarea class="report" rows="24" readonly>{{ text }}</textarea>
+{% endblock %}
