@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urlsplit
 
+from pypi_monitor.analyzers.execution import import_time
+
 
 class FactKind(StrEnum):
     IMPORT = "import"
@@ -21,7 +23,8 @@ class Fact:
     kind: FactKind
     value: str
     line: int
-    # Runs when the module is imported, not when somebody calls a function.
+    # Runs when the module is imported, not when somebody calls a function: module-level code and
+    # the functions it calls, see `execution`.
     at_import: bool
 
     @property
@@ -190,7 +193,8 @@ class _Visitor(ast.NodeVisitor):
         self._tree = tree
         self._aliases = _aliases(tree)
         self._tainted: set[str] | None = None
-        self._function_depth = 0
+        self._import_time = import_time(tree)
+        self._running = True
         self._facts: list[Fact] = []
 
     def run(self) -> list[Fact]:
@@ -209,12 +213,25 @@ class _Visitor(ast.NodeVisitor):
         return tainted
 
     def _add(self, kind: FactKind, value: str, node: ast.expr | ast.stmt) -> None:
-        self._facts.append(Fact(kind, value, node.lineno, self._function_depth == 0))
+        self._facts.append(Fact(kind, value, node.lineno, self._running))
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
-        self._function_depth += 1
+        running = self._running
+        self._running = running and node in self._import_time.executed
         self.generic_visit(node)
-        self._function_depth -= 1
+        self._running = running
+
+    def visit_If(self, node: ast.If) -> None:
+        if node not in self._import_time.skipped_blocks:
+            self.generic_visit(node)
+            return
+        self.visit(node.test)
+        running, self._running = self._running, False
+        for statement in node.body:
+            self.visit(statement)
+        self._running = running
+        for statement in node.orelse:
+            self.visit(statement)
 
     visit_FunctionDef = _visit_function
     visit_AsyncFunctionDef = _visit_function

@@ -17,6 +17,7 @@ from pypi_monitor.analyzers.context import ContextAnalyzer
 from pypi_monitor.analyzers.diff import DiffAnalyzer
 from pypi_monitor.analyzers.guarddog import GuardDogAnalyzer
 from pypi_monitor.analyzers.metadata import MetadataAnalyzer
+from pypi_monitor.analyzers.provenance import ProvenanceAnalyzer
 from pypi_monitor.db.session import create_engine, create_sessions
 from pypi_monitor.github import GitHubArchives
 from pypi_monitor.metrics import QUEUE_SIZE, STAGE_DURATION, STAGE_FAILURES, STAGE_RETRIES
@@ -93,6 +94,7 @@ def _reload_analyzers(pipeline: Pipeline, top_packages: dict[str, int]) -> None:
         DiffAnalyzer(),
         ConsistencyAnalyzer(),
         ContextAnalyzer(),
+        ProvenanceAnalyzer(),
     ]
 
 

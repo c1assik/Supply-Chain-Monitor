@@ -81,6 +81,8 @@ _OBSERVED = (
 class _Baseline:
     id: int
     version: str
+    # As the Simple API lists them, with their PEP 740 provenance URLs.
+    files: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,7 @@ class Pipeline:
                     await session.execute(
                         insert(Artifact).values(artifacts).on_conflict_do_nothing()
                     )
-        return _Baseline(baseline_id, version)
+        return _Baseline(baseline_id, version, files)
 
     async def _known_owners(self, package_id: int, release_id: int) -> list[str] | None:
         async with self._sessions() as session:
@@ -226,11 +228,52 @@ class Pipeline:
             "last_upload": max(earlier).isoformat() if earlier else None,
             "previous_version": previous.version if previous else None,
             "known_owners": await self._known_owners(package.id, release.id),
+            "provenance": await self._provenance(package, release, data, previous),
         }
         if snapshot["version_count"] <= 1:
             snapshot["owner_package_counts"] = await self._owner_package_counts(data)
         stripped: dict[str, Any] = _strip_nul(snapshot)
         return stripped
+
+    async def _provenance(
+        self,
+        package: Package,
+        release: Release,
+        data: dict[str, Any],
+        previous: _Baseline | None,
+    ) -> dict[str, Any] | None:
+        """Publishers of the previous version and of the analyzed files, for `ProvenanceAnalyzer`.
+
+        Only asked when the previous version had attestations: without them there is nothing a
+        new release could lose. A nice-to-have signal must not hold the release back.
+        """
+        attested = [file for file in previous.files if file.get("provenance")] if previous else []
+        if previous is None or not attested:
+            return None
+        try:
+            before = await self._client.provenance(
+                package.name, previous.version, attested[0]["filename"]
+            )
+            current = []
+            for file in choose_files(data["urls"], self._max_artifact_bytes):
+                found = await self._client.provenance(
+                    package.name, release.version, file["filename"]
+                )
+                current.append(
+                    {
+                        "filename": file["filename"],
+                        "packagetype": file["packagetype"],
+                        "publisher": publisher_of(found),
+                    }
+                )
+        except httpx.HTTPError as e:
+            log.warning("cannot read provenance of %s: %r", package.name, e)
+            return None
+        return {
+            "previous_publisher": publisher_of(before),
+            "previous_attested_types": sorted({_packagetype(f["filename"]) for f in attested}),
+            "files": current,
+        }
 
     async def _owner_package_counts(self, data: dict[str, Any]) -> dict[str, int]:
         counts = {}
@@ -538,6 +581,19 @@ def choose_files(files: list[dict[str, Any]], max_bytes: int) -> list[dict[str, 
     wheels = [file for file in fitting if file["packagetype"] == "bdist_wheel"]
     wheels.sort(key=lambda file: (not file["filename"].endswith("-none-any.whl"), file["size"]))
     return sdists[:1] + wheels[:1]
+
+
+def publisher_of(provenance: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The Trusted Publisher of a PEP 740 provenance object; claims are bulky and not compared."""
+    bundles = (provenance or {}).get("attestation_bundles") or []
+    publisher = bundles[0].get("publisher") if bundles else None
+    if not isinstance(publisher, dict):
+        return None
+    return {key: value for key, value in publisher.items() if key != "claims"}
+
+
+def _packagetype(filename: str) -> str:
+    return "bdist_wheel" if filename.endswith(".whl") else "sdist"
 
 
 def _artifact_type(file: dict[str, Any]) -> ArtifactType:

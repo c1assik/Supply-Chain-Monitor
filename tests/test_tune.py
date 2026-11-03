@@ -6,11 +6,13 @@ from benchmarks.corpus import Group, Split
 from benchmarks.malware import Result
 from benchmarks.tune import (
     Bounds,
+    OutOfFold,
     Row,
     apply_weights,
     bounds_for,
     features_of,
     fit,
+    margin_for_budget,
     precise_rules,
 )
 
@@ -53,9 +55,15 @@ def test_only_guarddog_and_metadata_rules_are_fitted() -> None:
 
 
 def test_precise_rule_needs_enough_fires_and_no_ordinary_ones() -> None:
-    rows = [row(True, sharp=0.9, seen=0.9, metadata_rule=0.9)] * 5 + [row(True, rare=0.9)] * 4
-    rows += [row(False, seen=0.9)]
-    assert precise_rules(rows) == {"sharp": 0.9, "metadata_rule": 0.9}
+    sharp, seen, rare = (f"guarddog.install.threat-{name}" for name in ("sharp", "seen", "rare"))
+    rows = [row(True, **{sharp: 0.9, seen: 0.9, "metadata.x": 0.9})] * 5
+    rows += [row(True, **{rare: 0.9})] * 4 + [row(False, **{seen: 0.9})]
+    assert precise_rules(rows) == {sharp: 0.9}
+
+
+def test_capabilities_never_alert_alone_however_rare_on_ordinary_code() -> None:
+    rows = [row(True, **{"guarddog.capability-process-hooks": 0.5})] * 50 + [row(False)] * 50
+    assert precise_rules(rows) == {}
 
 
 def test_metadata_is_never_precise_and_cannot_reach_an_alert_alone() -> None:
@@ -75,3 +83,16 @@ def test_hand_set_weights_survive() -> None:
     tuned = apply_weights(CONFIG, {"guarddog.x": 1.0}, 3.0, [])
     assert tuned.rule_weights["diff.new_dangerous_call"] == 5
     assert tuned.levels == CONFIG.levels
+
+
+def test_margin_meets_the_budget_out_of_fold() -> None:
+    def scored(group: Group, ratio: float) -> OutOfFold:
+        return OutOfFold(Result("id", "pkg", group, Split.TRAIN, [], [], 1), ratio)
+
+    ordinary = [scored(Group.RANDOM, 0.1)] * 997 + [scored(Group.RANDOM, 1.2)] * 3
+    malware = [scored(Group.MALICIOUS, 2.0), scored(Group.MALICIOUS, 1.1)]
+
+    margin, recall = margin_for_budget(ordinary + malware)
+
+    assert margin > 1.2
+    assert recall == 0.5

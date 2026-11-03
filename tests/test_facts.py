@@ -137,3 +137,12 @@ def test_fact_words(source: bytes) -> None:
 def test_every_dangerous_call_survives_the_cheap_test(source: bytes) -> None:
     assert may_have_facts(source)
     assert values(source.decode(), FactKind.CALL)
+
+
+def test_a_function_called_on_import_runs_on_import() -> None:
+    source = (
+        "def _go():\n    exec(a)\ndef later():\n    eval(b)\n_go()\n"
+        "if __name__ == '__main__':\n    compile(c)\n"
+    )
+    scope = {fact.value: fact.at_import for fact in facts(source)}
+    assert scope == {"exec": True, "eval": False, "compile": False}
