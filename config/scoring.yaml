@@ -16,7 +16,23 @@ rule_weights:
   diff.new_url: 0
   # Новый опасный вызов внутри функции сам ещё ни о чём не говорит.
   diff.new_dangerous_call: 5
+  # Новые скрипты и нативные модули в platform wheel: обычная разработка, улики для комбинаций.
+  # Пересборка бинарников platform wheel происходит в каждом релизе.
+  diff.file.new_script: 0
+  # Скрипт с загрузкой и непрозрачный блоб встречаются и в обычных релизах (pandas 3.1.0): сами по
+  # себе это улики, а вес они получают в комбинациях с признаками захвата аккаунта ниже.
+  diff.file.new_script_fetches: 5
+  diff.file.new_blob: 5
+  diff.file.new_platform_binary: 0
+  diff.file.platform_binaries_changed: 0
+  # Смена job'а публикации внутри того же репозитория бывает при обычном рефакторинге CI.
+  provenance.workflow_changed: 5
   # Вендоринг, тесты и прочее, что не устанавливается: только улики.
+  noise.diff.file.new_binary: 0
+  noise.diff.file.new_blob: 0
+  noise.diff.file.new_script: 0
+  noise.diff.file.new_script_fetches: 0
+  noise.diff.file.binary_changed: 0
   noise.diff.file.new_python: 0
   noise.diff.new_dangerous_call: 0
   noise.diff.new_import: 0
@@ -24,44 +40,42 @@ rule_weights:
   noise.diff.new_url: 0
   # Подобрано на train: python -m benchmarks.tune. Вручную не править.
   # Вес правила, не встречавшегося при подборе, берётся из severity_weights.
-  guarddog.capability-filesystem-browser: 11
-  guarddog.capability-process-hooks: 75
-  guarddog.install.threat-filesystem-read: 18
+  guarddog.capability-filesystem-browser: 7
+  guarddog.capability-process-hooks: 55
   guarddog.install.threat-network-exfil-messenger: 56
   guarddog.install.threat-network-exfil-sysinfo: 56
-  guarddog.install.threat-network-exfiltration: 72
-  guarddog.install.threat-network-outbound-shady-links: 56
+  guarddog.install.threat-network-exfiltration: 7
+  guarddog.install.threat-network-outbound-shady-links: 14
   guarddog.install.threat-network-reverse-shell: 56
-  guarddog.install.threat-process-cryptomining: 9
-  guarddog.install.threat-process-download-exec: 45
-  guarddog.install.threat-process-hooks: 2
+  guarddog.install.threat-process-cryptomining: 56
+  guarddog.install.threat-process-download-exec: 33
+  guarddog.install.threat-process-hooks: 4
   guarddog.install.threat-process-powershell-encoded: 56
-  guarddog.install.threat-process-spawn-silent: 100
-  guarddog.install.threat-runtime-dynamic-loader: 1
-  guarddog.install.threat-runtime-obfuscation: 72
+  guarddog.install.threat-process-spawn-silent: 2
   guarddog.install.threat-runtime-obfuscation-base64exec: 72
   guarddog.install.threat-runtime-obfuscation-chr: 56
-  guarddog.install.threat-runtime-obfuscation-general: 72
+  guarddog.install.threat-runtime-obfuscation-general: 2
   guarddog.install.threat-runtime-obfuscation-import-exec: 56
-  guarddog.install.threat-runtime-obfuscation-steganography: 5
   guarddog.install.threat-runtime-system-info: 100
   guarddog.install.threat-setup-import-aliasing: 56
   guarddog.install.threat-setup-network-in-install: 8
-  guarddog.install.threat-setup-suspicious-imports: 27
-  guarddog.threat-network-exfil-messenger: 20
-  guarddog.threat-network-exfil-sysinfo: 51
-  guarddog.threat-network-exfiltration: 13
-  guarddog.threat-network-outbound-shady-links: 39
-  guarddog.threat-process-cryptomining: 2
-  guarddog.threat-runtime-obfuscation-base64exec: 10
+  guarddog.install.threat-setup-suspicious-imports: 20
+  guarddog.threat-network-exfil-messenger: 16
+  guarddog.threat-network-exfil-sysinfo: 36
+  guarddog.threat-network-exfiltration: 9
+  guarddog.threat-network-outbound-shady-links: 29
+  guarddog.threat-process-cryptomining: 1
+  guarddog.threat-runtime-obfuscation-base64exec: 3
   guarddog.threat-runtime-obfuscation-chr: 2
   guarddog.threat-runtime-obfuscation-general: 2
-  guarddog.threat-runtime-screencapture: 2
-  guarddog.threat-runtime-system-info: 10
-  metadata.empty_readme: 14
-  metadata.foreign_repository: 14
-  metadata.no_repository: 14
-  metadata.typosquat: 14
+  guarddog.threat-runtime-screencapture: 1
+  guarddog.threat-runtime-system-info: 7
+  guarddog.threat-setup-network-in-install: 1
+  guarddog.threat-setup-suspicious-imports: 1
+  metadata.empty_readme: 11
+  metadata.foreign_repository: 11
+  metadata.no_repository: 11
+  metadata.typosquat: 11
   # Ноль: в обычных пакетах встречаются не реже, чем в малвари.
   guarddog.capability-filesystem-delete: 0
   guarddog.capability-filesystem-read: 0
@@ -72,11 +86,16 @@ rule_weights:
   guarddog.capability-process-schedule: 0
   guarddog.capability-process-spawn: 0
   guarddog.capability-runtime-clipboard: 0
+  guarddog.install.threat-filesystem-autostart: 0
+  guarddog.install.threat-filesystem-read: 0
   guarddog.install.threat-process-memory: 0
   guarddog.install.threat-process-sysinfo: 0
+  guarddog.install.threat-runtime-dynamic-loader: 0
   guarddog.install.threat-runtime-enumeration: 0
   guarddog.install.threat-runtime-environment-read: 0
   guarddog.install.threat-runtime-keylogging: 0
+  guarddog.install.threat-runtime-obfuscation: 0
+  guarddog.install.threat-runtime-obfuscation-steganography: 0
   guarddog.install.threat-runtime-obfuscation-unicode: 0
   guarddog.install.threat-runtime-screencapture: 0
   guarddog.threat-filesystem-autostart: 0
@@ -110,11 +129,11 @@ combos:
   - rules: [metadata.typosquat, metadata.new_package]
     bonus: 20
   - rules: [metadata.typosquat, guarddog.*threat-*]
-    bonus: 17
+    bonus: 13
   - rules: [metadata.new_package, guarddog.install.threat-*]
     bonus: 10
   - rules: [guarddog.capability-process-hooks, guarddog.install.threat-*]
-    bonus: 18
+    bonus: 14
   # Дифф: новый код становится подозрительным в связке, по отдельности это обычное обновление.
   # diff.install.* — изменения в коде, который исполняется при установке или импорте.
   - rules: [diff.install.new_dangerous_call, diff.install.new_import]
@@ -137,6 +156,31 @@ combos:
     bonus: 15
   - rules: [context.version_jump, diff.install.*]
     bonus: 10
+  # Подмена бинарника: сама по себе пересборка, вместе с захватом аккаунта — нет.
+  - rules: [context.owners_replaced, diff.file.*binar*]
+    bonus: 25
+  - rules: [context.dormant_release, diff.file.*binar*]
+    bonus: 15
+  # Дроппер (блоб или скрипт, который что-то скачивает) от захваченного аккаунта.
+  - rules: [context.owners_replaced, diff.file.new_blob]
+    bonus: 25
+  - rules: [context.owners_replaced, diff.file.new_script_fetches]
+    bonus: 25
+  - rules: [provenance.attestations_dropped, diff.file.new_blob]
+    bonus: 25
+  - rules: [provenance.attestations_dropped, diff.file.new_script_fetches]
+    bonus: 25
+  # Provenance: релиз загружен не тем путём, что раньше. Обычно это украденный токен или чужой CI.
+  - rules: [provenance.attestations_dropped, diff.*new_dangerous_call]
+    bonus: 30
+  - rules: [provenance.publisher_changed, diff.*new_dangerous_call]
+    bonus: 30
+  - rules: [provenance.*, diff.install.*]
+    bonus: 20
+  - rules: [provenance.attestations_dropped, diff.file.*binar*]
+    bonus: 25
+  - rules: [provenance.attestations_dropped, consistency.*]
+    bonus: 20
 
 # Подавление известных ложных срабатываний.
 allowlist:

@@ -69,4 +69,6 @@ def _as_json_file(file: dict[str, Any]) -> dict[str, Any]:
         "url": file["url"],
         "digests": {"sha256": file["hashes"]["sha256"]},
         "upload_time_iso_8601": file["upload-time"],
+        # PEP 740: a URL when the file was uploaded with attestations, by Trusted Publishing.
+        "provenance": file.get("provenance"),
     }

@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 from pypi_monitor.analyzers.consistency import ConsistencyAnalyzer
 from pypi_monitor.analyzers.context import ContextAnalyzer
 from pypi_monitor.analyzers.diff import DiffAnalyzer
+from pypi_monitor.analyzers.provenance import ProvenanceAnalyzer
 from pypi_monitor.db.models import Artifact, Package, Release
 from pypi_monitor.db.models import Signal as SignalRow
 from pypi_monitor.db.session import Sessions
@@ -53,6 +54,8 @@ class Index:
     owners: list[str] = field(default_factory=lambda: ["alice"])
     repository: str | None = None
     downloads: list[str] = field(default_factory=list)
+    # Trusted Publishers of versions uploaded with PEP 740 attestations.
+    publishers: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def publish(self, version: str, files: dict[str, str], upload: datetime = START) -> None:
         self.archives[version] = sdist(f"{self.name}-{version}", files)
@@ -82,8 +85,13 @@ class Index:
                     "hashes": file["digests"],
                     "upload-time": file["upload_time_iso_8601"],
                     "yanked": False,
+                    "provenance": (
+                        f"https://pypi.org/integrity/{self.name}/{version}/{file['filename']}/provenance"
+                        if version in self.publishers
+                        else None
+                    ),
                 }
-                for file in files
+                for version, file in zip(self.archives, files, strict=True)
             ],
         }
 
@@ -93,6 +101,12 @@ class Index:
             self.downloads.append(path)
             version = path.removeprefix(f"/{self.name}-").removesuffix(".tar.gz")
             return httpx.Response(200, content=self.archives[version])
+        if path.startswith("/integrity/"):
+            version = path.split("/")[3]
+            if version not in self.publishers:
+                return httpx.Response(404)
+            bundle = {"publisher": {**self.publishers[version], "claims": None}, "attestations": []}
+            return httpx.Response(200, json={"version": 1, "attestation_bundles": [bundle]})
         if path == f"/simple/{self.name}/":
             assert "pypi.simple" in request.headers["accept"]
             return httpx.Response(200, json=self._simple())
@@ -152,7 +166,7 @@ async def world(sessions: Sessions, queue: FakeQueue, storage: FakeStorage) -> A
         queue=queue,
         notifier=notifier,
         scoring=load_scoring_config(Path("config/scoring.yaml")),
-        analyzers=[DiffAnalyzer(), ConsistencyAnalyzer(), ContextAnalyzer()],
+        analyzers=[DiffAnalyzer(), ConsistencyAnalyzer(), ContextAnalyzer(), ProvenanceAnalyzer()],
         limits=LIMITS,
         max_artifact_bytes=5_000_000,
         analyzer_timeout_s=60,
@@ -403,3 +417,47 @@ async def test_github_failure_does_not_stop_the_release(world: World) -> None:
     await github.aclose()
 
     assert (await world.release("1.0")).status is ReleaseStatus.CLEAN
+
+
+PUBLISHER = {
+    "kind": "GitHub",
+    "repository": "acme/lib",
+    "workflow": "release.yml",
+    "environment": "",
+}
+
+
+async def test_a_release_without_the_attestations_of_its_predecessor(world: World) -> None:
+    world.index.publishers["1.0"] = PUBLISHER
+    world.index.publish("1.0", CLEAN)
+    world.index.publish("1.1", CLEAN, START + timedelta(days=1))
+
+    await world.process("1.1")
+
+    snapshot = (await world.release("1.1")).pypi_metadata["provenance"]
+    assert snapshot["previous_publisher"] == PUBLISHER
+    assert snapshot["files"] == [
+        {"filename": "lib-1.1.tar.gz", "packagetype": "sdist", "publisher": None}
+    ]
+    assert "provenance.attestations_dropped" in await world.rules()
+
+
+async def test_a_release_from_another_repository(world: World) -> None:
+    world.index.publishers["1.0"] = PUBLISHER
+    world.index.publishers["1.1"] = {**PUBLISHER, "repository": "mallory/lib"}
+    world.index.publish("1.0", CLEAN)
+    world.index.publish("1.1", CLEAN, START + timedelta(days=1))
+
+    await world.process("1.1")
+
+    assert "provenance.publisher_changed" in await world.rules()
+
+
+async def test_without_attestations_before_provenance_is_not_asked(world: World) -> None:
+    world.index.publish("1.0", CLEAN)
+    world.index.publish("1.1", CLEAN, START + timedelta(days=1))
+
+    await world.process("1.1")
+
+    assert (await world.release("1.1")).pypi_metadata["provenance"] is None
+    assert not {rule for rule in await world.rules() if rule.startswith("provenance.")}

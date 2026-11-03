@@ -32,6 +32,13 @@ from pypi_monitor.analyzers.tree import (
         ("pkg.egg-info/SOURCES.txt", Role.IGNORED),
         ("dist-info/RECORD", Role.IGNORED),
         ("dist-info/entry_points.txt", Role.NORMAL),
+        ("data/purelib/pkg/__init__.py", Role.AUTORUN),
+        ("data/platlib/evil.pth", Role.AUTORUN),
+        ("data/purelib/pkg/core.py", Role.NORMAL),
+        ("sitecustomize.py", Role.AUTORUN),
+        ("src/usercustomize.py", Role.AUTORUN),
+        ("pkg/sitecustomize.py", Role.NORMAL),
+        ("tests/fixtures/setup.py", Role.NOISY),
     ],
 )
 def test_roles(path: str, role: Role) -> None:
@@ -137,3 +144,33 @@ def test_facts_alone_agree_with_a_full_parse() -> None:
 
 def test_facts_of_a_source_that_cannot_be_read() -> None:
     assert reader().facts(b"import socket\ndef broken(:\n") is None
+
+
+def test_wheel_install_schemes_are_compared_where_pip_puts_them(tmp_path: Path) -> None:
+    archive = tmp_path / "a-1.0-py3-none-any.whl"
+    for path in ("a/core.py", "a-1.0.data/purelib/a/__init__.py", "a-1.0.data/platlib/a/core.py"):
+        (archive / path).parent.mkdir(parents=True, exist_ok=True)
+        (archive / path).write_text("x = 1\n")
+
+    files = artifact_trees(tmp_path)[WHEEL].files
+
+    # A clash keeps both files: the one at the root keeps its name.
+    assert set(files) == {"a/__init__.py", "a/core.py", "data/platlib/a/core.py"}
+    assert files["a/core.py"] == archive / "a/core.py"
+
+
+def test_a_function_of_a_docstring_alone_is_read() -> None:
+    assert reader().facts(b'import os\ndef f():\n    """Doc."""\nos.system("x")\n')
+
+
+@pytest.mark.parametrize(
+    ("tags", "pure"),
+    [("Tag: py3-none-any\n", True), ("Tag: cp313-cp313-manylinux_2_17_x86_64\n", False)],
+)
+def test_wheel_purity_comes_from_its_tags(tags: str, pure: bool, tmp_path: Path) -> None:
+    # Copies of a wheel, as in the benchmark corpus, may carry any file name.
+    archive = tmp_path / "a-1.0-py3-none-any.whl"
+    (archive / "a-1.0.dist-info").mkdir(parents=True)
+    (archive / "a-1.0.dist-info/WHEEL").write_text(f"Wheel-Version: 1.0\n{tags}")
+
+    assert artifact_trees(tmp_path)[WHEEL].pure is pure

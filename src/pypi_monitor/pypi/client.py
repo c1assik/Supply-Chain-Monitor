@@ -80,6 +80,19 @@ class PyPIClient:
         path = f"/simple/{quote(canonicalize_name(name), safe='')}/"
         return await self._json(path, {"Accept": SIMPLE_JSON})
 
+    async def provenance(self, name: str, version: str, filename: str) -> dict[str, Any] | None:
+        """PEP 740 provenance of a file: who published it, or None when it has no attestations."""
+        path = "/".join(
+            quote(part, safe="")
+            for part in ("integrity", canonicalize_name(name), version, filename, "provenance")
+        )
+        response = await self._http.get(f"/{path}")
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        response.raise_for_status()
+        data: dict[str, Any] = response.json()
+        return data
+
     async def top_packages(self, url: str) -> list[str]:
         """Project names from a top-pypi-packages dump, most downloaded first."""
         response = await self._http.get(url, follow_redirects=True)

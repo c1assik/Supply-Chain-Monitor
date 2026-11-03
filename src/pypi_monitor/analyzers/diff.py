@@ -9,9 +9,10 @@ the point: an `exec` that lived in a helper and moved into `__init__.py` is a ne
 import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
+from pypi_monitor.analyzers import content
 from pypi_monitor.analyzers.base import Analyzer, ReleaseContext, Signal
 from pypi_monitor.analyzers.facts import Fact, FactKind
 from pypi_monitor.analyzers.tree import (
@@ -30,7 +31,6 @@ from pypi_monitor.domain import Severity
 
 NOISE_RULE_PREFIX = "noise."
 _NOISY_CONFIDENCE_FACTOR = 0.2
-_BINARY_SUFFIXES = frozenset({".bin", ".dll", ".dylib", ".elf", ".exe", ".pyc", ".pyd", ".so"})
 _MAX_SIGNALS_PER_RULE = 10
 _MAX_SNIPPET = 200
 _SEVERITY_ORDER = list(Severity)
@@ -81,7 +81,7 @@ class _Baseline:
 
 class DiffAnalyzer(Analyzer):
     name: ClassVar[str] = "diff"
-    version: ClassVar[str] = "2"
+    version: ClassVar[str] = "3"
 
     def analyze(self, release: ReleaseContext) -> list[Signal]:
         if release.artifact_dir is None or release.previous_artifact_dir is None:
@@ -109,6 +109,8 @@ class DiffAnalyzer(Analyzer):
 
 def _diff(old: Tree, new: Tree, reader: CodeReader, installed: set[str] | None) -> Iterator[Signal]:
     baseline = _Baseline(old, reader)
+    # A platform wheel rebuilds its binaries on every release, so they are told as one fact.
+    rebuilt: list[str] = []
     for path, real in sorted(new.files.items()):
         role = role_of(path)
         if role is Role.IGNORED:
@@ -123,9 +125,9 @@ def _diff(old: Tree, new: Tree, reader: CodeReader, installed: set[str] | None) 
         ):
             continue
         suffix = PurePosixPath(path).suffix
-        if suffix in _BINARY_SUFFIXES:
-            if before is None and new.pure:
-                yield _new_binary(new, path, role)
+        if suffix not in _HANDLED_SUFFIXES and PurePosixPath(path).name != "entry_points.txt":
+            if role is not Role.IGNORED:
+                yield from _diff_other(new, path, real, role, before is None, rebuilt)
             continue
         source = read_source(real)
         if source is None:
@@ -140,6 +142,68 @@ def _diff(old: Tree, new: Tree, reader: CodeReader, installed: set[str] | None) 
             yield from _diff_entry_points(new, path, source, old_source)
         elif path == "pyproject.toml":
             yield from _diff_pyproject(new, path, source, old_source)
+    if rebuilt:
+        yield _signal(
+            "diff.file.platform_binaries_changed",
+            Severity.LOW,
+            0.5,
+            f"{len(rebuilt)} binaries changed: {', '.join(rebuilt[:5])}",
+            new,
+            rebuilt[0],
+            Role.NORMAL,
+        )
+
+
+_HANDLED_SUFFIXES = frozenset({".py", ".pth", ".toml"})
+
+
+def _diff_other(
+    tree: Tree, path: str, real: Path, role: Role, is_new: bool, rebuilt: list[str]
+) -> Iterator[Signal]:
+    """Files the diff cannot read as code: binaries, scripts and data."""
+    with real.open("rb") as file:
+        head = file.read(content.SAMPLE_BYTES)
+    kind = content.kind_of(path, head)
+    if kind is content.Kind.BINARY:
+        if not tree.pure and not is_new:
+            rebuilt.append(path)
+        elif not tree.pure:
+            # Evidence for the context combos: a new native module is ordinary development.
+            yield _signal(
+                "diff.file.new_platform_binary", Severity.LOW, 0.5, "new binary", tree, path, role
+            )
+        elif is_new:
+            yield _new_binary(tree, path, role)
+        else:
+            # Pure artifacts that bundle a tool rebuild it too, so alone this is only evidence;
+            # with a hijacked account or lost attestations it is a swapped binary.
+            yield _signal(
+                "diff.file.binary_changed", Severity.LOW, 0.6, "binary changed", tree, path, role
+            )
+    elif not is_new:
+        return
+    elif kind is content.Kind.SCRIPT:
+        fetch = content.SCRIPT_FETCHES.search(head)
+        if fetch is None:
+            yield _signal("diff.file.new_script", Severity.LOW, 0.5, "new script", tree, path, role)
+        else:
+            line = head[: fetch.end()].count(b"\n") + 1
+            snippet = head.splitlines()[line - 1].decode("utf-8", "replace").strip()
+            yield _signal(
+                "diff.file.new_script_fetches",
+                Severity.MEDIUM,
+                0.7,
+                f"new script that downloads or decodes\n{snippet[:_MAX_SNIPPET]}",
+                tree,
+                path,
+                role,
+                line,
+            )
+    elif kind is content.Kind.OPAQUE:
+        reason = content.opaque_reason(head) or ""
+        yield _signal(
+            "diff.file.new_blob", Severity.MEDIUM, 0.6, f"opaque data: {reason}", tree, path, role
+        )
 
 
 def _diff_python(

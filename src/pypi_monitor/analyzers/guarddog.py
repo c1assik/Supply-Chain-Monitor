@@ -7,7 +7,7 @@ overlap with `MetadataAnalyzer`.
 import logging
 from functools import lru_cache
 from importlib import metadata
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, ClassVar
 
 from guarddog.analyzer.sourcecode import YaraRule, get_sourcecode_rules
@@ -15,18 +15,19 @@ from guarddog.ecosystems import ECOSYSTEM
 from guarddog.scanners.pypi_package_scanner import PypiPackageScanner
 
 from pypi_monitor.analyzers.base import Analyzer, ReleaseContext, Signal
+from pypi_monitor.analyzers.startup import StartupCode
+from pypi_monitor.analyzers.tree import Role, Tree, all_trees, role_of
 from pypi_monitor.domain import Severity
 
 log = logging.getLogger(__name__)
 
 RULE_PREFIX = "guarddog."
-# Findings in code that runs by itself on install or import: this is where malware lives.
+# Findings in code that runs by itself on install or import: this is where malware lives. The
+# roles are those of the diff, see `tree.role_of` and `startup`.
 INSTALL_RULE_PREFIX = "guarddog.install."
 THREAT_PREFIX = "threat-"
 # Elsewhere threat rules mostly describe what ordinary CLI tools and agents do.
 OUTSIDE_INSTALL_CONFIDENCE_FACTOR = 0.2
-# <archive>/<package>/__init__.py in a wheel, <archive>/<root>/<package>/__init__.py in an sdist.
-MAX_TOP_LEVEL_INIT_DEPTH = 4
 # Noisy rules can match thousands of times in a big package; the first few tell the story.
 MAX_SIGNALS_PER_RULE = 10
 CAPABILITY_PREFIX = "capability-"
@@ -44,7 +45,7 @@ def _scanner() -> PypiPackageScanner:
 
 class GuardDogAnalyzer(Analyzer):
     name: ClassVar[str] = "guarddog"
-    version: ClassVar[str] = f"{metadata.version('guarddog')}+2"
+    version: ClassVar[str] = f"{metadata.version('guarddog')}+3"
 
     def __init__(self) -> None:
         self._rules = {rule.id: rule for rule in get_sourcecode_rules(ECOSYSTEM.PYPI, YaraRule)}
@@ -71,6 +72,7 @@ def normalize_results(
     results: dict[str, Any], rules: dict[str, Any], artifact_dir: Path
 ) -> list[Signal]:
     signals = []
+    places = _Places(artifact_dir)
     for rule_id, findings in results.items():
         # Rules without findings report an empty dict, not an empty list.
         if not findings:
@@ -86,7 +88,7 @@ def normalize_results(
             file_path, line = _parse_location(finding.get("location", ""), artifact_dir)
             signal_rule, signal_confidence = f"{RULE_PREFIX}{rule_id}", confidence
             if rule_id.startswith(THREAT_PREFIX):
-                if _runs_on_install_or_import(file_path):
+                if places.runs_by_itself(file_path, line):
                     signal_rule = f"{INSTALL_RULE_PREFIX}{rule_id}"
                 else:
                     signal_confidence *= OUTSIDE_INSTALL_CONFIDENCE_FACTOR
@@ -103,14 +105,36 @@ def normalize_results(
     return signals
 
 
-def _runs_on_install_or_import(file_path: str | None) -> bool:
-    if file_path is None:
-        return False
-    parts = PurePosixPath(file_path).parts
-    name = parts[-1]
-    if name == "setup.py" or name.endswith(".pth"):
-        return True
-    return name == "__init__.py" and len(parts) <= MAX_TOP_LEVEL_INIT_DEPTH
+class _Places:
+    """Where a finding sits in its artifact, read lazily: most releases have no threat findings."""
+
+    def __init__(self, artifact_dir: Path) -> None:
+        self._artifact_dir = artifact_dir
+        self._index: dict[str, tuple[Tree, str]] | None = None
+        self._startup: dict[int, StartupCode] = {}
+
+    def runs_by_itself(self, file_path: str | None, line: int | None) -> bool:
+        found = self._find(file_path)
+        if found is None:
+            return False
+        tree, path = found
+        role = role_of(path)
+        if role is Role.AUTORUN:
+            return True
+        if role is not Role.NORMAL:
+            return False  # Tests, vendored code and the like: a test may well call `setup()`.
+        startup = self._startup.setdefault(id(tree), StartupCode(tree))
+        return startup.runs_at_import(path, line)
+
+    def _find(self, file_path: str | None) -> tuple[Tree, str] | None:
+        if file_path is None:
+            return None
+        if self._index is None:
+            trees = all_trees(self._artifact_dir) if self._artifact_dir.is_dir() else []
+            self._index = {
+                tree.display(path): (tree, path) for tree in trees for path in tree.files
+            }
+        return self._index.get(file_path)
 
 
 def _parse_location(location: str, artifact_dir: Path) -> tuple[str | None, int | None]:

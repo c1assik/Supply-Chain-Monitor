@@ -18,6 +18,10 @@ MAX_SOURCE_BYTES = 10 * 1024 * 1024
 VERSION_PLACEHOLDER = "<version>"
 
 _BUILD_DIR = re.compile(r"^[^/]+\.(dist-info|data)/")
+# pip installs these next to the root of a wheel: the prefix says nothing about how code runs.
+_INSTALL_SCHEME = re.compile(r"^data/(?:purelib|platlib)/")
+# site.py imports them on every interpreter start, as it runs the import lines of a .pth.
+_STARTUP_HOOKS = frozenset({"sitecustomize.py", "usercustomize.py"})
 _MAX_AUTORUN_INIT_DEPTH = 2  # pkg/__init__.py, and the same under src/
 _METADATA_SUFFIXES = (".egg-info", "dist-info")
 _NOISY_DIRS = frozenset(
@@ -59,6 +63,7 @@ class Role(Enum):
 
 
 def role_of(path: str) -> Role:
+    path = _INSTALL_SCHEME.sub("", path)
     pure = PurePosixPath(path)
     name, parents = pure.name, pure.parts[:-1]
     if name.endswith(".pth"):
@@ -74,8 +79,10 @@ def role_of(path: str) -> Role:
     ):
         return Role.NOISY
     package_parts = pure.parts[1:] if pure.parts[0] == "src" else pure.parts
-    if path == "setup.py" or (
-        name == "__init__.py" and len(package_parts) <= _MAX_AUTORUN_INIT_DEPTH
+    if (
+        path == "setup.py"
+        or (name in _STARTUP_HOOKS and len(package_parts) == 1)
+        or (name == "__init__.py" and len(package_parts) <= _MAX_AUTORUN_INIT_DEPTH)
     ):
         return Role.AUTORUN
     return Role.NORMAL
@@ -119,22 +126,46 @@ def _path_suffixes(path: str) -> Iterator[str]:
 def artifact_trees(artifact_dir: Path) -> dict[str, Tree]:
     """Trees of `<artifact_dir>/<archive>/...` by artifact kind."""
     trees: dict[str, Tree] = {}
-    for archive in sorted(path for path in artifact_dir.iterdir() if path.is_dir()):
-        tree = load_tree(archive, artifact_dir)
+    for tree in all_trees(artifact_dir):
         trees.setdefault(tree.kind, tree)
     return trees
 
 
+def all_trees(artifact_dir: Path) -> list[Tree]:
+    """Every archive of `<artifact_dir>/<archive>/...`, in a stable order."""
+    archives = sorted(path for path in artifact_dir.iterdir() if path.is_dir())
+    return [load_tree(archive, artifact_dir) for archive in archives]
+
+
 def load_tree(archive: Path, base: Path) -> Tree:
     if archive.name.endswith(".whl"):
-        files = {
+        walked = {
             _BUILD_DIR.sub(r"\1/", path): real for path, real in _walk(archive, archive).items()
         }
-        return Tree(WHEEL, archive.name.endswith("-none-any.whl"), base, files)
+        files = {path: real for path, real in walked.items() if not _INSTALL_SCHEME.match(path)}
+        for path, real in sorted(walked.items()):
+            # `<name>.data/purelib/pkg` lands where `pkg` does, so it is compared as `pkg`. A
+            # clash keeps both: no file may drop out of the analysis.
+            installed = _INSTALL_SCHEME.sub("", path)
+            if installed != path:
+                files[installed if installed not in files else path] = real
+        return Tree(WHEEL, _is_pure_wheel(archive.name, files.get("dist-info/WHEEL")), base, files)
     # An sdist and a source archive have one directory with a version in its name.
     entries = list(archive.iterdir())
     root = entries[0] if len(entries) == 1 and entries[0].is_dir() else archive
     return Tree(SDIST, True, base, _walk(root, root))
+
+
+def _is_pure_wheel(filename: str, metadata: Path | None) -> bool:
+    """The tags inside the wheel tell, its file name is only a copy of them."""
+    if metadata is not None and metadata.stat().st_size <= MAX_SOURCE_BYTES:
+        text = metadata.read_text("utf-8", "replace")
+        tags = [
+            line.partition(":")[2].strip() for line in text.splitlines() if line.startswith("Tag:")
+        ]
+        if tags:
+            return all(tag.endswith("-none-any") for tag in tags)
+    return filename.endswith("-none-any.whl")
 
 
 def _walk(top: Path, root: Path) -> dict[str, Path]:
