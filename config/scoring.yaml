@@ -40,42 +40,40 @@ rule_weights:
   noise.diff.new_url: 0
   # Подобрано на train: python -m benchmarks.tune. Вручную не править.
   # Вес правила, не встречавшегося при подборе, берётся из severity_weights.
-  guarddog.capability-filesystem-browser: 7
-  guarddog.capability-process-hooks: 55
-  guarddog.install.threat-network-exfil-messenger: 56
-  guarddog.install.threat-network-exfil-sysinfo: 56
-  guarddog.install.threat-network-exfiltration: 7
-  guarddog.install.threat-network-outbound-shady-links: 14
-  guarddog.install.threat-network-reverse-shell: 56
-  guarddog.install.threat-process-cryptomining: 56
-  guarddog.install.threat-process-download-exec: 33
-  guarddog.install.threat-process-hooks: 4
+  guarddog.capability-filesystem-browser: 6
+  guarddog.capability-process-hooks: 53
+  guarddog.capability-process-spawn: 2
+  guarddog.install.threat-network-exfil-messenger: 10
+  guarddog.install.threat-network-exfil-sysinfo: 14
+  guarddog.install.threat-network-exfiltration: 12
+  guarddog.install.threat-network-outbound-shady-links: 17
+  guarddog.install.threat-network-reverse-shell: 3
+  guarddog.install.threat-process-cryptomining: 3
+  guarddog.install.threat-process-download-exec: 35
+  guarddog.install.threat-process-hooks: 9
   guarddog.install.threat-process-powershell-encoded: 56
-  guarddog.install.threat-process-spawn-silent: 2
-  guarddog.install.threat-runtime-obfuscation-base64exec: 72
+  guarddog.install.threat-process-spawn-silent: 1
+  guarddog.install.threat-runtime-obfuscation-base64exec: 32
   guarddog.install.threat-runtime-obfuscation-chr: 56
-  guarddog.install.threat-runtime-obfuscation-general: 2
+  guarddog.install.threat-runtime-obfuscation-general: 5
   guarddog.install.threat-runtime-obfuscation-import-exec: 56
-  guarddog.install.threat-runtime-system-info: 100
+  guarddog.install.threat-runtime-system-info: 1
   guarddog.install.threat-setup-import-aliasing: 56
-  guarddog.install.threat-setup-network-in-install: 8
-  guarddog.install.threat-setup-suspicious-imports: 20
-  guarddog.threat-network-exfil-messenger: 16
-  guarddog.threat-network-exfil-sysinfo: 36
-  guarddog.threat-network-exfiltration: 9
-  guarddog.threat-network-outbound-shady-links: 29
-  guarddog.threat-process-cryptomining: 1
-  guarddog.threat-runtime-obfuscation-base64exec: 3
-  guarddog.threat-runtime-obfuscation-chr: 2
-  guarddog.threat-runtime-obfuscation-general: 2
+  guarddog.install.threat-setup-network-in-install: 10
+  guarddog.install.threat-setup-suspicious-imports: 25
+  guarddog.threat-network-exfil-messenger: 9
+  guarddog.threat-network-exfil-sysinfo: 23
+  guarddog.threat-network-exfiltration: 6
+  guarddog.threat-network-outbound-shady-links: 21
+  guarddog.threat-runtime-obfuscation-base64exec: 1
+  guarddog.threat-runtime-obfuscation-chr: 1
+  guarddog.threat-runtime-obfuscation-general: 1
   guarddog.threat-runtime-screencapture: 1
-  guarddog.threat-runtime-system-info: 7
-  guarddog.threat-setup-network-in-install: 1
-  guarddog.threat-setup-suspicious-imports: 1
-  metadata.empty_readme: 11
-  metadata.foreign_repository: 11
-  metadata.no_repository: 11
-  metadata.typosquat: 11
+  guarddog.threat-runtime-system-info: 6
+  metadata.empty_readme: 14
+  metadata.foreign_repository: 14
+  metadata.no_repository: 14
+  metadata.typosquat: 14
   # Ноль: в обычных пакетах встречаются не реже, чем в малвари.
   guarddog.capability-filesystem-delete: 0
   guarddog.capability-filesystem-read: 0
@@ -84,10 +82,11 @@ rule_weights:
   guarddog.capability-network-lolbas: 0
   guarddog.capability-network-outbound: 0
   guarddog.capability-process-schedule: 0
-  guarddog.capability-process-spawn: 0
   guarddog.capability-runtime-clipboard: 0
   guarddog.install.threat-filesystem-autostart: 0
+  guarddog.install.threat-filesystem-destruction: 0
   guarddog.install.threat-filesystem-read: 0
+  guarddog.install.threat-process-injection-dll: 0
   guarddog.install.threat-process-memory: 0
   guarddog.install.threat-process-sysinfo: 0
   guarddog.install.threat-runtime-dynamic-loader: 0
@@ -104,10 +103,13 @@ rule_weights:
   guarddog.threat-network-dns-exfil: 0
   guarddog.threat-network-reverse-shell: 0
   guarddog.threat-npm-http-dependency: 0
+  guarddog.threat-npm-preinstall-script: 0
+  guarddog.threat-process-cryptomining: 0
   guarddog.threat-process-download-exec: 0
   guarddog.threat-process-hooks: 0
   guarddog.threat-process-injection-dll: 0
   guarddog.threat-process-memory: 0
+  guarddog.threat-process-powershell-encoded: 0
   guarddog.threat-process-spawn-silent: 0
   guarddog.threat-process-sysinfo: 0
   guarddog.threat-runtime-dynamic-loader: 0
@@ -122,6 +124,8 @@ rule_weights:
   guarddog.threat-runtime-obfuscation-pyarmor: 0
   guarddog.threat-runtime-obfuscation-steganography: 0
   guarddog.threat-runtime-obfuscation-unicode: 0
+  guarddog.threat-setup-network-in-install: 0
+  guarddog.threat-setup-suspicious-imports: 0
 
 # Комбинации правил дают бонус к сумме. В rules можно использовать шаблоны с *.
 # guarddog.install.* — находки в коде, который исполняется при установке или импорте.

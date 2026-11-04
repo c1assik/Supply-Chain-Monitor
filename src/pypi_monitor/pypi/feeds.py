@@ -1,5 +1,6 @@
 """Parsing of the PyPI RSS feeds and the XML-RPC changelog."""
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -8,6 +9,8 @@ from urllib.parse import unquote, urlparse
 import defusedxml.ElementTree as ElementTree
 
 NEW_RELEASE_ACTION = "new release"
+# `add source file a-1.0.tar.gz`, `add py3 file a-1.0-py3-none-any.whl`, `add cp313 file ...`.
+_ADD_FILE_ACTION = re.compile(r"^add \S+ file (\S+)$")
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,12 @@ class ChangelogEvent:
     timestamp: datetime
     action: str
     serial: int
+
+
+def added_file(action: str) -> str | None:
+    """The file name of an `add ... file` changelog action."""
+    match = _ADD_FILE_ACTION.match(action)
+    return match[1] if match else None
 
 
 def parse_feed(document: bytes) -> list[FeedEntry]:

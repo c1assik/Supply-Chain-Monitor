@@ -18,6 +18,7 @@ from pypi_monitor.analyzers.execution import (
     ImportNode,
     ImportTime,
     all_imports,
+    dynamic_import_package,
     import_time,
     is_dynamic_import,
 )
@@ -169,8 +170,29 @@ def _targets(module: _Module | None, imports: Iterable[ImportNode]) -> Iterator[
                     yield f"{base}.{alias.name}" if base else alias.name
         else:
             name = is_dynamic_import(node)
-            if name is not None and not name.startswith("."):
+            if name is not None and name.startswith("."):
+                name = _relative_dynamic(module, name, dynamic_import_package(node))
+            if name is not None:
                 yield from _prefixes(name)
+
+
+def _relative_dynamic(module: _Module | None, name: str, package: str | None) -> str | None:
+    """`import_module("._core", __name__)` the way importlib resolves it."""
+    if package in ("__name__", "__package__"):
+        if module is None:
+            return None
+        if package == "__package__" and not module.is_package:
+            package = module.name.rpartition(".")[0]
+        else:
+            package = module.name
+    if not package:
+        return None
+    rest = name.lstrip(".")
+    level = len(name) - len(rest)
+    bits = package.rsplit(".", level - 1)
+    if len(bits) < level:
+        return None
+    return f"{bits[0]}.{rest}" if rest else bits[0]
 
 
 def _absolute(module: _Module | None, node: ast.ImportFrom) -> str | None:

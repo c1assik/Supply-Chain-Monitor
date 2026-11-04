@@ -127,6 +127,34 @@ def test_the_import_graph_follows_chains_and_setup_py(tmp_path: Path) -> None:
     assert threat_at(tmp_path, "a.tar.gz/a-1.0/src/a/sub/meta.py", 1) == "guarddog.install.threat-x"
 
 
+@pytest.mark.parametrize(
+    ("init", "target"),
+    [
+        ('import importlib\nimportlib.import_module("._core", __name__)\n', "a/_core.py"),
+        ('from importlib import import_module\nimport_module(".x", package="a")\n', "a/x.py"),
+        ('import importlib\nimportlib.import_module("..b.y", "a.sub")\n', "a/b/y.py"),
+        ('import importlib\nimportlib.import_module(".z", __spec__.parent)\n', "a/z.py"),
+    ],
+)
+def test_a_relative_import_module_is_resolved_against_its_package(
+    init: str, target: str, tmp_path: Path
+) -> None:
+    (tmp_path / "a.whl/a").mkdir(parents=True)
+    (tmp_path / "a.whl/a/__init__.py").write_text(init)
+
+    assert threat_at(tmp_path, f"a.whl/{target}", 1) == "guarddog.install.threat-x"
+
+
+def test_a_relative_import_module_from_a_plain_module_uses_its_package(tmp_path: Path) -> None:
+    (tmp_path / "a.whl/a").mkdir(parents=True)
+    (tmp_path / "a.whl/a/__init__.py").write_text("from . import loader\n")
+    (tmp_path / "a.whl/a/loader.py").write_text(
+        'import importlib\nimportlib.import_module("._core", __package__)\n'
+    )
+
+    assert threat_at(tmp_path, "a.whl/a/_core.py", 1) == "guarddog.install.threat-x"
+
+
 def test_a_module_nothing_imports_on_start_is_ordinary(tmp_path: Path) -> None:
     (tmp_path / "a.whl/a").mkdir(parents=True)
     (tmp_path / "a.whl/a/__init__.py").write_text("def lazy():\n    from . import _core\n")

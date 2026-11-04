@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from packaging.utils import canonicalize_name
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,3 +75,41 @@ async def package_exists(session: AsyncSession, name: str) -> bool:
         select(Package.id).where(Package.normalized_name == canonicalize_name(name))
     )
     return package_id is not None
+
+
+# Done with, or on the way: a file it has not seen means one more pass through the stages.
+_REFRESHABLE = (
+    ReleaseStatus.DOWNLOADED,
+    ReleaseStatus.ANALYZED,
+    ReleaseStatus.ALERTED,
+    ReleaseStatus.CLEAN,
+    ReleaseStatus.FAILED,
+)
+
+
+async def record_added_file(
+    session: AsyncSession, name: str, version: str, filename: str, serial: int | None = None
+) -> int | None:
+    """A file was uploaded into a release: return the id of a release to process, or None.
+
+    A malicious wheel for one platform can come after the clean ones, or into a version that is
+    years old. A release that we have already looked at without this file is analyzed again
+    under a new revision; one we have never seen is recorded as new.
+    """
+    package_id = await get_or_create_package(session, name)
+    release = await session.scalar(
+        select(Release).where(Release.package_id == package_id, Release.version == version)
+    )
+    if release is None or release.status is ReleaseStatus.BASELINE:
+        return await record_release(session, name, version, serial=serial)
+    if release.status not in _REFRESHABLE:
+        return None  # Queued: the download has not chosen its files yet.
+    seen = {file.get("filename") for file in release.pypi_metadata.get("urls", [])}
+    if filename in seen:
+        return None  # The changelog is behind the RSS feed: we have had this file all along.
+    return await session.scalar(
+        update(Release)
+        .where(Release.id == release.id, Release.revision == release.revision)
+        .values(status=ReleaseStatus.QUEUED, revision=release.revision + 1)
+        .returning(Release.id)
+    )

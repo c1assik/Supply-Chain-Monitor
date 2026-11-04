@@ -11,11 +11,11 @@ from sqlalchemy.dialects.postgresql import insert
 
 from pypi_monitor.db.models import IngestCursor, Package, Release
 from pypi_monitor.db.session import Sessions
-from pypi_monitor.ingest.store import record_release
+from pypi_monitor.ingest.store import record_added_file, record_release
 from pypi_monitor.metrics import FEED_ERRORS, FEED_LAST_SUCCESS, RELEASES_INGESTED
 from pypi_monitor.pipeline.queue import ReleaseQueue, Stage
 from pypi_monitor.pypi import NotReadyError, PyPIClient
-from pypi_monitor.pypi.feeds import NEW_RELEASE_ACTION, FeedEntry
+from pypi_monitor.pypi.feeds import NEW_RELEASE_ACTION, FeedEntry, added_file
 
 log = logging.getLogger(__name__)
 
@@ -90,12 +90,20 @@ class Poller:
             new_ids = []
             async with self._sessions.begin() as session:
                 for event in events:
-                    if event.action != NEW_RELEASE_ACTION or event.version is None:
+                    if event.version is None:
                         continue
-                    release_id = await record_release(
-                        session, event.name, event.version, event.timestamp, event.serial
-                    )
-                    if release_id is not None:
+                    filename = added_file(event.action)
+                    if event.action == NEW_RELEASE_ACTION:
+                        release_id = await record_release(
+                            session, event.name, event.version, event.timestamp, event.serial
+                        )
+                    elif filename is not None:
+                        release_id = await record_added_file(
+                            session, event.name, event.version, filename, event.serial
+                        )
+                    else:
+                        continue
+                    if release_id is not None and release_id not in new_ids:
                         new_ids.append(release_id)
                 await session.merge(IngestCursor(name=CHANGELOG_CURSOR, serial=serial))
             await self._publish(new_ids, "changelog")

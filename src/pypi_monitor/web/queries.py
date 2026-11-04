@@ -4,11 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pypi_monitor.db.models import AnalysisRun, Artifact, Package, Release, Signal, Verdict
 from pypi_monitor.db.session import Sessions
 from pypi_monitor.domain import DecidedBy, Label, ReleaseStatus, Severity
+from pypi_monitor.pipeline.stages import primary_artifacts
 from pypi_monitor.web.diff import StoredArtifact
 
 PAGE_SIZE = 50
@@ -68,6 +69,13 @@ async def feed(
         .correlate(Release)
         .scalar_subquery()
     )
+    # A release analyzed again has an automatic verdict per revision: the last one stands.
+    last_auto = (
+        select(func.max(Verdict.id))
+        .where(Verdict.release_id == Release.id, Verdict.decided_by == DecidedBy.AUTO)
+        .correlate(Release)
+        .scalar_subquery()
+    )
     query = (
         select(
             Release.id,
@@ -82,7 +90,7 @@ async def feed(
         )
         .join(Package, Package.id == Release.package_id)
         .join(Verdict, Verdict.release_id == Release.id)
-        .where(Verdict.decided_by == DecidedBy.AUTO, Verdict.level.in_(_LEVELS[level]))
+        .where(Verdict.id == last_auto, Verdict.level.in_(_LEVELS[level]))
     )
     if search:
         pattern = f"%{_escape_like(search)}%"
@@ -151,14 +159,16 @@ async def release_card(sessions: Sessions, release_id: int) -> ReleaseCard | Non
                 select(Verdict).where(Verdict.release_id == release_id).order_by(Verdict.id.desc())
             )
         )
-        runs = list(
-            await session.scalars(select(AnalysisRun).where(AnalysisRun.release_id == release_id))
+        # The current revision: a file added later may have made the earlier one obsolete.
+        current = (AnalysisRun.release_id == release_id) & (
+            AnalysisRun.revision == release.revision
         )
+        runs = list(await session.scalars(select(AnalysisRun).where(current)))
         signals = list(
             await session.execute(
                 select(AnalysisRun.analyzer, Signal)
                 .join(Signal, Signal.run_id == AnalysisRun.id)
-                .where(AnalysisRun.release_id == release_id)
+                .where(current)
             )
         )
         artifacts = list(
@@ -211,7 +221,9 @@ async def stored_artifacts(sessions: Sessions, release_id: int | None) -> list[S
     if release_id is None:
         return []
     async with sessions() as session:
-        rows = await session.execute(
-            select(Artifact.filename, Artifact.storage_key).where(Artifact.release_id == release_id)
+        artifacts = list(
+            await session.scalars(select(Artifact).where(Artifact.release_id == release_id))
         )
-        return [StoredArtifact(filename, key) for filename, key in rows]
+    # The diff page shows what the diff compared: the other wheels are in the signals of the card.
+    primary, _ = primary_artifacts(artifacts)
+    return [StoredArtifact(artifact.filename, artifact.storage_key) for artifact in primary]

@@ -2,6 +2,10 @@
 
 A stage acts only on a release in its own status and commits the next status together with its
 results, so running a stage twice is harmless and a release can always be picked up again.
+
+A file uploaded into a release after we have looked at it sends the release through the stages
+again under a new revision (`ingest.store.record_added_file`). A stage still busy with the old
+revision then finds the release changed under it and drops its results.
 """
 
 import asyncio
@@ -44,6 +48,7 @@ from pypi_monitor.pipeline.unpack import (
     UnsupportedArchiveError,
     unpack,
 )
+from pypi_monitor.pipeline.wheels import keep_unique_files
 from pypi_monitor.pypi import NotReadyError, PyPIClient
 from pypi_monitor.pypi.client import ArtifactTooLargeError
 from pypi_monitor.pypi.versions import choose_previous
@@ -57,6 +62,9 @@ MAX_PATH_LENGTH = 1024
 UNPACK_ANALYZER = "unpack"
 UNPACK_ANALYZER_VERSION = "1"
 ALERT_LEVELS = frozenset({Severity.HIGH, Severity.CRITICAL})
+# A release may have a wheel for every platform and Python; past this many the rest are not read.
+MAX_WHEELS = 64
+_LEVEL_ORDER = list(Severity)
 UNSAFE_ARCHIVE_SEVERITY = {
     "path_traversal": Severity.HIGH,
     "too_large": Severity.MEDIUM,
@@ -75,6 +83,10 @@ _OBSERVED = (
     ReleaseStatus.ALERTED,
     ReleaseStatus.CLEAN,
 )
+
+
+class _SupersededError(Exception):
+    """The release has moved on while a stage worked on it: a newer revision is queued."""
 
 
 @dataclass(frozen=True)
@@ -142,16 +154,27 @@ class Pipeline:
             previous = await self._baseline(package, release)
         BASELINES.labels("found" if previous else "none").inc()
         snapshot = await self._snapshot(package, release, data, project, previous)
-        artifacts = await self._fetch_artifacts(package, release.id, release.version, data["urls"])
+        async with self._sessions() as session:
+            stored = set(
+                await session.scalars(
+                    select(Artifact.filename).where(Artifact.release_id == release_id)
+                )
+            )
+        files = choose_files(data["urls"], self._max_artifact_bytes)
+        artifacts = await self._fetch_artifacts(
+            package, release.id, release.version, [f for f in files if f["filename"] not in stored]
+        )
         uploads = [_upload_time(file) for file in data["urls"]]
 
-        async with self._sessions.begin() as session:
-            if artifacts:
-                await session.execute(insert(Artifact).values(artifacts).on_conflict_do_nothing())
-            await session.execute(
-                update(Release)
-                .where(Release.id == release_id)
-                .values(
+        try:
+            async with self._sessions.begin() as session:
+                if artifacts:
+                    await session.execute(
+                        insert(Artifact).values(artifacts).on_conflict_do_nothing()
+                    )
+                await _advance(
+                    session,
+                    release,
                     status=ReleaseStatus.DOWNLOADED,
                     maintainers=[role["user"] for role in _roles(data)],
                     pypi_metadata=snapshot,
@@ -159,7 +182,8 @@ class Pipeline:
                     published_at=min(uploads),
                     prev_release_id=previous.id if previous else None,
                 )
-            )
+        except _SupersededError:
+            return
         await self._queue.enqueue(Stage.ANALYZE, release_id, priority=package.is_popular)
 
     async def _baseline(self, package: Package, release: Release) -> _Baseline | None:
@@ -178,7 +202,9 @@ class Pipeline:
                 select(Artifact.id).where(Artifact.release_id == baseline_id).limit(1)
             )
         if stored is None:
-            artifacts = await self._fetch_artifacts(package, baseline_id, version, files)
+            # Every wheel: the other wheels of the release are compared with the same platform's.
+            chosen = choose_files(files, self._max_artifact_bytes)
+            artifacts = await self._fetch_artifacts(package, baseline_id, version, chosen)
             if artifacts:
                 async with self._sessions.begin() as session:
                     await session.execute(
@@ -255,7 +281,9 @@ class Pipeline:
                 package.name, previous.version, attested[0]["filename"]
             )
             current = []
-            for file in choose_files(data["urls"], self._max_artifact_bytes):
+            # Every file, the ones too big to analyze included: a wheel uploaded from elsewhere
+            # is exactly what a stolen token produces.
+            for file in data["urls"]:
                 found = await self._client.provenance(
                     package.name, release.version, file["filename"]
                 )
@@ -293,9 +321,14 @@ class Pipeline:
     async def _fetch_artifacts(
         self, package: Package, release_id: int, version: str, files: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        """Download `files`, already chosen, into the storage. Identical files are kept once."""
         artifacts = []
+        hashes: set[str] = set()
         with tempfile.TemporaryDirectory(prefix="scm-download-") as directory:
-            for file in choose_files(files, self._max_artifact_bytes):
+            for file in files:
+                if file["digests"]["sha256"] in hashes:
+                    continue
+                hashes.add(file["digests"]["sha256"])
                 filename = _safe_filename(file["filename"])
                 path = Path(directory) / filename
                 sha256 = await self._client.download(file["url"], path, self._max_artifact_bytes)
@@ -330,18 +363,28 @@ class Pipeline:
                 )
             )
 
+        artifacts, extra_wheels = primary_artifacts(artifacts)
+        previous_artifacts, previous_extra_wheels = primary_artifacts(previous_artifacts)
+        if not extra_wheels:
+            previous_extra_wheels = []  # Only read to compare the other wheels with.
+
         with tempfile.TemporaryDirectory(prefix="scm-analyze-") as directory:
             root = Path(directory)
             archives, unpacked, previous = root / "archives", root / "unpacked", root / "previous"
-            archives.mkdir()
-            unpacked.mkdir()
-            previous.mkdir()
+            extra, previous_extra = root / "extra", root / "previous-extra"
+            for path in (archives, unpacked, previous, extra, previous_extra):
+                path.mkdir()
             started = time.monotonic()
             unpack_signals = [
                 signal
                 for artifact in artifacts
                 for signal in await self._unpack(artifact, archives, unpacked)
             ]
+            for artifact in extra_wheels:
+                unpack_signals += await self._unpack(artifact, archives, extra)
+            loop = asyncio.get_running_loop()
+            if extra_wheels:
+                await loop.run_in_executor(self._executor, keep_unique_files, unpacked, extra)
             runs = [
                 _Run(
                     UNPACK_ANALYZER,
@@ -353,33 +396,43 @@ class Pipeline:
             # Its archive rules are the business of its own analysis.
             for artifact in previous_artifacts:
                 await self._unpack(artifact, archives, previous)
+            for artifact in previous_extra_wheels:
+                await self._unpack(artifact, archives, previous_extra)
+            if previous_extra_wheels:
+                await loop.run_in_executor(
+                    self._executor, keep_unique_files, previous, previous_extra
+                )
             context = ReleaseContext(
                 name=package.name,
                 version=release.version,
                 metadata=release.pypi_metadata,
                 artifact_dir=unpacked if artifacts else None,
                 previous_artifact_dir=previous if previous_artifacts else None,
+                extra_wheels_dir=extra if any(extra.iterdir()) else None,
+                previous_extra_wheels_dir=(
+                    previous_extra if any(previous_extra.iterdir()) else None
+                ),
                 repository_dir=await self._fetch_tag(package, release, root),
             )
             runs += await asyncio.gather(*(self._run(a, context) for a in self.analyzers))
 
-        async with self._sessions.begin() as session:
-            for run in runs:
-                row = AnalysisRun(
-                    release_id=release_id,
-                    analyzer=run.analyzer,
-                    analyzer_version=run.version,
-                    duration_ms=run.duration_ms,
-                    error=run.error,
-                )
-                session.add(row)
-                await session.flush()
-                session.add_all(_signal_row(row.id, signal) for signal in run.signals)
-            await session.execute(
-                update(Release)
-                .where(Release.id == release_id)
-                .values(status=ReleaseStatus.ANALYZED)
-            )
+        try:
+            async with self._sessions.begin() as session:
+                for run in runs:
+                    row = AnalysisRun(
+                        release_id=release_id,
+                        analyzer=run.analyzer,
+                        analyzer_version=run.version,
+                        duration_ms=run.duration_ms,
+                        error=run.error,
+                        revision=release.revision,
+                    )
+                    session.add(row)
+                    await session.flush()
+                    session.add_all(_signal_row(row.id, signal) for signal in run.signals)
+                await _advance(session, release, status=ReleaseStatus.ANALYZED)
+        except _SupersededError:
+            return
         await self._queue.enqueue(Stage.SCORE, release_id, priority=package.is_popular)
 
     async def _fetch_tag(self, package: Package, release: Release, root: Path) -> Path | None:
@@ -459,30 +512,34 @@ class Pipeline:
         if loaded is None:
             return
         release, package = loaded
-        async with self._sessions.begin() as session:
-            verdict = await self._auto_verdict(session, release_id)
-            if verdict is None:
-                signals = await self._signals(session, release_id)
-                result = score_release(
-                    signals, self._scoring, package.normalized_name, package.is_popular
-                )
-                verdict = Verdict(
-                    release_id=release_id,
-                    score=result.score,
-                    level=result.level,
-                    decided_by=DecidedBy.AUTO,
-                )
-                session.add(verdict)
-                VERDICTS.labels(result.level.value).inc()
-                if release.published_at is not None:
-                    latency = datetime.now(UTC) - release.published_at
-                    VERDICT_LATENCY.observe(latency.total_seconds())
-            if verdict.level not in ALERT_LEVELS:
-                await session.execute(
-                    update(Release)
-                    .where(Release.id == release_id)
-                    .values(status=ReleaseStatus.CLEAN)
-                )
+        try:
+            async with self._sessions.begin() as session:
+                verdict = await self._auto_verdict(session, release)
+                if verdict is None:
+                    signals = await self._signals(session, release)
+                    result = score_release(
+                        signals, self._scoring, package.normalized_name, package.is_popular
+                    )
+                    verdict = Verdict(
+                        release_id=release_id,
+                        score=result.score,
+                        level=result.level,
+                        decided_by=DecidedBy.AUTO,
+                        revision=release.revision,
+                    )
+                    session.add(verdict)
+                    VERDICTS.labels(result.level.value).inc()
+                    if release.published_at is not None and release.revision == 0:
+                        latency = datetime.now(UTC) - release.published_at
+                        VERDICT_LATENCY.observe(latency.total_seconds())
+                if verdict.level not in ALERT_LEVELS:
+                    await _advance(session, release, status=ReleaseStatus.CLEAN)
+                elif await self._alerted_already(session, release, verdict.level):
+                    # A wheel added to an alerted release does not make news unless it is worse.
+                    await _advance(session, release, status=ReleaseStatus.ALERTED)
+                    return
+        except _SupersededError:
+            return
         if verdict.level in ALERT_LEVELS:
             await self._queue.enqueue(Stage.ALERT, release_id, priority=package.is_popular)
 
@@ -492,10 +549,10 @@ class Pipeline:
             return
         release, package = loaded
         async with self._sessions() as session:
-            verdict = await self._auto_verdict(session, release_id)
+            verdict = await self._auto_verdict(session, release)
             if verdict is None:
                 raise ValueError(f"release {release_id} has no verdict to alert on")
-            signals = await self._signals(session, release_id)
+            signals = await self._signals(session, release)
         top = score_release(
             signals, self._scoring, package.normalized_name, package.is_popular
         ).top_signals
@@ -503,10 +560,11 @@ class Pipeline:
         await self._notifier.send(
             Alert(package.name, release.version, verdict.score, verdict.level, top, link)
         )
-        async with self._sessions.begin() as session:
-            await session.execute(
-                update(Release).where(Release.id == release_id).values(status=ReleaseStatus.ALERTED)
-            )
+        try:
+            async with self._sessions.begin() as session:
+                await _advance(session, release, status=ReleaseStatus.ALERTED)
+        except _SupersededError:
+            pass  # Sent all the same: the next revision decides whether to send again.
         ALERTS.labels(verdict.level.value).inc()
 
     async def fail(self, release_id: int) -> None:
@@ -542,19 +600,33 @@ class Pipeline:
             found = row.one_or_none()
             return None if found is None else (found[0], found[1])
 
-    async def _auto_verdict(self, session: Any, release_id: int) -> Verdict | None:
+    async def _auto_verdict(self, session: Any, release: Release) -> Verdict | None:
         verdict: Verdict | None = await session.scalar(
             select(Verdict).where(
-                Verdict.release_id == release_id, Verdict.decided_by == DecidedBy.AUTO
+                Verdict.release_id == release.id,
+                Verdict.decided_by == DecidedBy.AUTO,
+                Verdict.revision == release.revision,
             )
         )
         return verdict
 
-    async def _signals(self, session: Any, release_id: int) -> list[FoundSignal]:
+    async def _alerted_already(self, session: Any, release: Release, level: Severity) -> bool:
+        """An earlier revision got an alert at this level or above."""
+        levels = await session.scalars(
+            select(Verdict.level).where(
+                Verdict.release_id == release.id,
+                Verdict.decided_by == DecidedBy.AUTO,
+                Verdict.revision < release.revision,
+            )
+        )
+        rank = _LEVEL_ORDER.index(level)
+        return any(old in ALERT_LEVELS and _LEVEL_ORDER.index(old) >= rank for old in levels)
+
+    async def _signals(self, session: Any, release: Release) -> list[FoundSignal]:
         rows = await session.scalars(
             select(SignalRow)
             .join(AnalysisRun, AnalysisRun.id == SignalRow.run_id)
-            .where(AnalysisRun.release_id == release_id)
+            .where(AnalysisRun.release_id == release.id, AnalysisRun.revision == release.revision)
         )
         return [
             FoundSignal(
@@ -569,8 +641,14 @@ class Pipeline:
         ]
 
 
-def choose_files(files: list[dict[str, Any]], max_bytes: int) -> list[dict[str, Any]]:
-    """Pick the sdist and one wheel: a release can have dozens of nearly identical wheels."""
+def choose_files(
+    files: list[dict[str, Any]], max_bytes: int, max_wheels: int = MAX_WHEELS
+) -> list[dict[str, Any]]:
+    """The sdist and the wheels, the one the diff compares first.
+
+    Every wheel is read: a payload may sit in the wheel of one platform only. The first is a pure
+    wheel if there is one, else the smallest: that is what the previous version is compared with.
+    """
     fitting = []
     for file in files:
         if file["size"] > max_bytes:
@@ -579,8 +657,40 @@ def choose_files(files: list[dict[str, Any]], max_bytes: int) -> list[dict[str, 
             fitting.append(file)
     sdists = [file for file in fitting if file["packagetype"] == "sdist"]
     wheels = [file for file in fitting if file["packagetype"] == "bdist_wheel"]
-    wheels.sort(key=lambda file: (not file["filename"].endswith("-none-any.whl"), file["size"]))
-    return sdists[:1] + wheels[:1]
+    wheels.sort(key=_wheel_order)
+    if len(wheels) > max_wheels:
+        ARTIFACTS_SKIPPED.labels("too_many_wheels").inc(len(wheels) - max_wheels)
+    return sdists[:1] + wheels[:max_wheels]
+
+
+def _wheel_order(file: dict[str, Any]) -> tuple[bool, int, str]:
+    return not file["filename"].endswith("-none-any.whl"), file["size"], file["filename"]
+
+
+def primary_artifacts(artifacts: list[Artifact]) -> tuple[list[Artifact], list[Artifact]]:
+    """The sdist and the first wheel, which are diffed and compared, and the other wheels."""
+    sdists = [a for a in artifacts if a.type is ArtifactType.SDIST]
+    wheels = sorted(
+        (a for a in artifacts if a.type is ArtifactType.WHEEL),
+        key=lambda a: _wheel_order({"filename": a.filename, "size": a.size}),
+    )
+    return sdists[:1] + wheels[:1], sdists[1:] + wheels[1:]
+
+
+async def _advance(session: Any, release: Release, **values: Any) -> None:
+    """Move the release on, unless a newer revision has been queued since it was loaded."""
+    moved = await session.scalar(
+        update(Release)
+        .where(
+            Release.id == release.id,
+            Release.status == release.status,
+            Release.revision == release.revision,
+        )
+        .values(**values)
+        .returning(Release.id)
+    )
+    if moved is None:
+        raise _SupersededError(release.id)
 
 
 def publisher_of(provenance: dict[str, Any] | None) -> dict[str, Any] | None:

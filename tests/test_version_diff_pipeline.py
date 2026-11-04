@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import tarfile
+import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -18,14 +19,14 @@ from pypi_monitor.analyzers.consistency import ConsistencyAnalyzer
 from pypi_monitor.analyzers.context import ContextAnalyzer
 from pypi_monitor.analyzers.diff import DiffAnalyzer
 from pypi_monitor.analyzers.provenance import ProvenanceAnalyzer
-from pypi_monitor.db.models import Artifact, Package, Release
+from pypi_monitor.db.models import Artifact, Package, Release, Verdict
 from pypi_monitor.db.models import Signal as SignalRow
 from pypi_monitor.db.session import Sessions
 from pypi_monitor.domain import ReleaseStatus, Severity
 from pypi_monitor.github import GitHubArchives
-from pypi_monitor.ingest.store import record_release
+from pypi_monitor.ingest.store import record_added_file, record_release
 from pypi_monitor.pipeline.queue import Stage
-from pypi_monitor.pipeline.stages import Pipeline
+from pypi_monitor.pipeline.stages import Pipeline, _advance, _SupersededError
 from pypi_monitor.pipeline.unpack import UnpackLimits
 from pypi_monitor.pypi import PyPIClient
 from pypi_monitor.pypi.client import FILES_HOST
@@ -56,25 +57,42 @@ class Index:
     downloads: list[str] = field(default_factory=list)
     # Trusted Publishers of versions uploaded with PEP 740 attestations.
     publishers: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Wheels of a version by file name, and files uploaded without attestations all the same.
+    wheels: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    unattested: set[str] = field(default_factory=set)
 
     def publish(self, version: str, files: dict[str, str], upload: datetime = START) -> None:
         self.archives[version] = sdist(f"{self.name}-{version}", files)
         self.uploads[version] = upload
 
-    def _file(self, version: str) -> dict[str, Any]:
-        archive = self.archives[version]
-        filename = f"{self.name}-{version}.tar.gz"
+    def add_wheel(self, version: str, tag: str, files: dict[str, str]) -> str:
+        filename = f"{self.name}-{version}-{tag}.whl"
+        self.wheels.setdefault(version, {})[filename] = wheel(files)
+        return filename
+
+    def _file(self, version: str, filename: str | None = None) -> dict[str, Any]:
+        if filename is None:
+            filename = f"{self.name}-{version}.tar.gz"
+            archive = self.archives[version]
+        else:
+            archive = self.wheels[version][filename]
         return {
             "filename": filename,
-            "packagetype": "sdist",
+            "packagetype": "bdist_wheel" if filename.endswith(".whl") else "sdist",
             "size": len(archive),
             "url": f"https://{FILES_HOST}/{filename}",
             "digests": {"sha256": hashlib.sha256(archive).hexdigest()},
             "upload_time_iso_8601": self.uploads[version].isoformat(),
         }
 
+    def _files(self, version: str) -> list[dict[str, Any]]:
+        wheels = self.wheels.get(version, {})
+        return [self._file(version)] + [self._file(version, name) for name in wheels]
+
+    def _attested(self, version: str, filename: str) -> bool:
+        return version in self.publishers and filename not in self.unattested
+
     def _simple(self) -> dict[str, Any]:
-        files = [self._file(version) for version in self.archives]
         return {
             "versions": list(self.archives),
             "files": [
@@ -87,11 +105,12 @@ class Index:
                     "yanked": False,
                     "provenance": (
                         f"https://pypi.org/integrity/{self.name}/{version}/{file['filename']}/provenance"
-                        if version in self.publishers
+                        if self._attested(version, file["filename"])
                         else None
                     ),
                 }
-                for version, file in zip(self.archives, files, strict=True)
+                for version in self.archives
+                for file in self._files(version)
             ],
         }
 
@@ -99,11 +118,15 @@ class Index:
         path = request.url.path
         if request.url.host == FILES_HOST:
             self.downloads.append(path)
-            version = path.removeprefix(f"/{self.name}-").removesuffix(".tar.gz")
+            filename = path.removeprefix("/")
+            for wheels in self.wheels.values():
+                if filename in wheels:
+                    return httpx.Response(200, content=wheels[filename])
+            version = filename.removeprefix(f"{self.name}-").removesuffix(".tar.gz")
             return httpx.Response(200, content=self.archives[version])
         if path.startswith("/integrity/"):
-            version = path.split("/")[3]
-            if version not in self.publishers:
+            version, filename = path.split("/")[3:5]
+            if not self._attested(version, filename):
                 return httpx.Response(404)
             bundle = {"publisher": {**self.publishers[version], "claims": None}, "attestations": []}
             return httpx.Response(200, json={"version": 1, "attestation_bundles": [bundle]})
@@ -119,10 +142,18 @@ class Index:
             "last_serial": 1,
         }
         if path == f"/pypi/{self.name}/json":
-            data["releases"] = {v: [self._file(v)] for v in self.archives}
+            data["releases"] = {v: self._files(v) for v in self.archives}
         else:
-            data["urls"] = [self._file(path.split("/")[3])]
+            data["urls"] = self._files(path.split("/")[3])
         return httpx.Response(200, content=json.dumps(data))
+
+
+def wheel(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for path, content in files.items():
+            archive.writestr(path, content)
+    return buffer.getvalue()
 
 
 @dataclass
@@ -461,3 +492,134 @@ async def test_without_attestations_before_provenance_is_not_asked(world: World)
 
     assert (await world.release("1.1")).pypi_metadata["provenance"] is None
     assert not {rule for rule in await world.rules() if rule.startswith("provenance.")}
+
+
+LINUX = "cp313-cp313-manylinux_2_28_x86_64"
+WINDOWS = "cp313-cp313-win_amd64"
+WHEEL_CLEAN = {"lib/__init__.py": "X = 1\n", "lib/_core.py": "def f():\n    return 1\n"}
+WHEEL_INFECTED = {**WHEEL_CLEAN, "lib/__init__.py": BACKDOOR + "X = 1\n"}
+
+
+async def signals_by_rule(world: World) -> dict[str, list[SignalRow]]:
+    found: dict[str, list[SignalRow]] = {}
+    async with world.sessions() as session:
+        for row in await session.scalars(select(SignalRow)):
+            found.setdefault(row.rule_id, []).append(row)
+    return found
+
+
+async def test_a_payload_in_the_wheel_of_one_platform_only(world: World) -> None:
+    for version, day, windows in (("1.0", 0, WHEEL_CLEAN), ("1.1", 1, WHEEL_INFECTED)):
+        world.index.publish(version, CLEAN, START + timedelta(days=day))
+        world.index.add_wheel(version, LINUX, WHEEL_CLEAN)
+        world.index.add_wheel(version, WINDOWS, windows)
+
+    await world.process("1.1")
+
+    assert (await world.release("1.1")).status is ReleaseStatus.ALERTED
+    found = await signals_by_rule(world)
+    paths = {row.file_path for row in found["diff.exec_decoded"]}
+    assert paths == {f"lib-1.1-{WINDOWS}.whl/lib/__init__.py"}
+    # The code that both wheels share is read once.
+    assert not {path for rows in found.values() for row in rows if (path := row.file_path)} & {
+        f"lib-1.1-{WINDOWS}.whl/lib/_core.py"
+    }
+
+
+async def test_identical_platform_wheels_say_nothing_new(world: World) -> None:
+    for version, day in (("1.0", 0), ("1.1", 1)):
+        world.index.publish(version, CLEAN, START + timedelta(days=day))
+        world.index.add_wheel(version, LINUX, WHEEL_CLEAN)
+        world.index.add_wheel(version, WINDOWS, {**WHEEL_CLEAN, "lib/_win.py": "import ctypes\n"})
+
+    await world.process("1.1")
+
+    assert (await world.release("1.1")).status is ReleaseStatus.CLEAN
+    # The Windows module is compared with the Windows wheel of 1.0, not called new.
+    assert "diff.file.new_python" not in await world.rules()
+
+
+async def test_a_wheel_added_after_the_verdict_is_analyzed_again(world: World) -> None:
+    world.index.publish("1.0", CLEAN)
+    world.index.add_wheel("1.0", LINUX, WHEEL_CLEAN)
+    world.index.publish("1.1", CLEAN, START + timedelta(days=1))
+    world.index.add_wheel("1.1", LINUX, WHEEL_CLEAN)
+    release_id = await world.process("1.1")
+    assert (await world.release("1.1")).status is ReleaseStatus.CLEAN
+
+    filename = world.index.add_wheel("1.1", WINDOWS, WHEEL_INFECTED)
+    async with world.sessions.begin() as session:
+        assert await record_added_file(session, "lib", "1.1", filename) == release_id
+    world.queue.jobs.append((Stage.DOWNLOAD, release_id))
+    while world.queue.jobs:
+        stage, job = world.queue.jobs.pop(0)
+        await getattr(world.pipeline, stage.value)(job)
+
+    release = await world.release("1.1")
+    assert release.status is ReleaseStatus.ALERTED
+    assert release.revision == 1
+    assert world.notifier.alerts[0].level is Severity.CRITICAL
+    async with world.sessions() as session:
+        verdicts = list(await session.scalars(select(Verdict).order_by(Verdict.id)))
+    assert [(v.revision, v.level in (Severity.LOW, Severity.MEDIUM)) for v in verdicts] == [
+        (0, True),
+        (1, False),
+    ]
+    # The files that were there before are not downloaded again.
+    assert world.index.downloads.count(f"/lib-1.1-{LINUX}.whl") == 1
+
+
+async def test_an_alerted_release_does_not_alert_again_for_the_same_level(world: World) -> None:
+    world.index.publish("1.0", CLEAN)
+    world.index.publish("1.1", INFECTED, START + timedelta(days=1))
+    release_id = await world.process("1.1")
+    assert len(world.notifier.alerts) == 1
+
+    filename = world.index.add_wheel("1.1", LINUX, WHEEL_CLEAN)
+    async with world.sessions.begin() as session:
+        assert await record_added_file(session, "lib", "1.1", filename) == release_id
+    world.queue.jobs.append((Stage.DOWNLOAD, release_id))
+    while world.queue.jobs:
+        stage, job = world.queue.jobs.pop(0)
+        await getattr(world.pipeline, stage.value)(job)
+
+    assert (await world.release("1.1")).status is ReleaseStatus.ALERTED
+    assert len(world.notifier.alerts) == 1
+
+
+async def test_a_stage_of_an_old_revision_drops_its_results(world: World) -> None:
+    world.index.publish("1.0", CLEAN)
+    world.index.publish("1.1", CLEAN, START + timedelta(days=1))
+    release_id = await world.process("1.1")
+    async with world.sessions.begin() as session:
+        await session.execute(
+            update(Release)
+            .where(Release.id == release_id)
+            .values(status=ReleaseStatus.ANALYZED, revision=3)
+        )
+    loaded = await world.release("1.1")
+    async with world.sessions.begin() as session:
+        # Meanwhile a file arrives and the release is queued under a newer revision.
+        await session.execute(update(Release).where(Release.id == release_id).values(revision=4))
+
+    async with world.sessions.begin() as session:
+        with pytest.raises(_SupersededError):
+            await _advance(session, loaded, status=ReleaseStatus.CLEAN)
+    assert (await world.release("1.1")).status is ReleaseStatus.ANALYZED
+
+
+async def test_a_wheel_uploaded_without_attestations_next_to_attested_ones(world: World) -> None:
+    world.index.publishers["1.0"] = PUBLISHER
+    world.index.publishers["1.1"] = PUBLISHER
+    for version, day in (("1.0", 0), ("1.1", 1)):
+        world.index.publish(version, CLEAN, START + timedelta(days=day))
+        world.index.add_wheel(version, LINUX, WHEEL_CLEAN)
+    world.index.unattested.add(world.index.add_wheel("1.1", WINDOWS, WHEEL_CLEAN))
+    world.index.add_wheel("1.0", WINDOWS, WHEEL_CLEAN)
+
+    await world.process("1.1")
+
+    found = await signals_by_rule(world)
+    assert [row.file_path for row in found["provenance.attestations_dropped"]] == [
+        f"lib-1.1-{WINDOWS}.whl"
+    ]

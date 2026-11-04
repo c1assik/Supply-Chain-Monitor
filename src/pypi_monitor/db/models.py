@@ -83,6 +83,8 @@ class Release(Base):
     status: Mapped[ReleaseStatus] = mapped_column(
         _enum(ReleaseStatus, "status"), server_default=ReleaseStatus.QUEUED.value
     )
+    # Grows when a file added after the analysis makes the release go through the stages again.
+    revision: Mapped[int] = mapped_column(Integer, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -119,6 +121,8 @@ class AnalysisRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
+    # The revision of the release this run analyzed: only runs of the current one are scored.
+    revision: Mapped[int] = mapped_column(Integer, server_default="0")
 
 
 class Signal(Base):
@@ -153,4 +157,6 @@ class Verdict(Base):
     decided_by: Mapped[DecidedBy] = mapped_column(_enum(DecidedBy, "decided_by"))
     label: Mapped[Label | None] = mapped_column(_enum(Label, "label"))
     comment: Mapped[str | None] = mapped_column(Text)
+    # An automatic verdict belongs to one revision of the analysis; a human label to the release.
+    revision: Mapped[int] = mapped_column(Integer, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

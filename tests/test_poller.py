@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 
 from pypi_monitor.db.models import Package, Release
 from pypi_monitor.db.session import Sessions
+from pypi_monitor.domain import ReleaseStatus
 from pypi_monitor.ingest.poller import PACKAGES_FEED, UPDATES_FEED, Poller
 from pypi_monitor.pipeline.queue import Stage
 from pypi_monitor.pypi import ChangelogEvent, FeedEntry, NotReadyError, PyPIClient
@@ -124,3 +125,52 @@ async def test_catch_up_fills_a_gap_after_downtime(
     assert len(queue.jobs) == 3
 
     assert await poller.catch_up() == 0
+
+
+async def finish(sessions: Sessions, name: str, files: list[str]) -> int:
+    """The release has been through the stages and saw `files` on PyPI."""
+    async with sessions.begin() as session:
+        release = await session.scalar(
+            select(Release).join(Package).where(Package.normalized_name == name)
+        )
+        assert release is not None
+        release.status = ReleaseStatus.CLEAN
+        release.pypi_metadata = {"urls": [{"filename": file} for file in files]}
+        return release.id
+
+
+async def test_a_file_added_after_the_verdict_starts_a_new_revision(
+    poller: Poller, pypi: FakePyPI, sessions: Sessions, queue: FakeQueue
+) -> None:
+    await poller.catch_up()
+    pypi.events = [event("lib", "1.0", 101)]
+    await poller.catch_up()
+    release_id = await finish(sessions, "lib", ["lib-1.0.tar.gz", "lib-1.0-py3-none-any.whl"])
+    queue.jobs.clear()
+
+    pypi.events += [
+        # Behind the RSS feed: the download had this file already.
+        event("lib", "1.0", 102, "add py3 file lib-1.0-py3-none-any.whl"),
+        event("lib", "1.0", 103, "add cp313 file lib-1.0-cp313-cp313-win_amd64.whl"),
+        event("lib", "1.0", 104, "add cp312 file lib-1.0-cp312-cp312-win_amd64.whl"),
+        event("lib", "1.0", 105, "remove file lib-1.0.tar.gz"),
+    ]
+
+    assert await poller.catch_up() == 1
+    assert queue.jobs == [(Stage.DOWNLOAD, release_id)]
+    async with sessions() as session:
+        release = await session.get(Release, release_id)
+        assert release is not None
+        assert release.status is ReleaseStatus.QUEUED
+        # The second upload found the release queued already: one more pass covers both.
+        assert release.revision == 1
+
+
+async def test_a_file_added_to_a_version_we_never_saw_is_analyzed(
+    poller: Poller, pypi: FakePyPI, sessions: Sessions, queue: FakeQueue
+) -> None:
+    await poller.catch_up()
+    pypi.events = [event("lib", "0.1", 101, "add py3 file lib-0.1-py3-none-any.whl")]
+
+    assert await poller.catch_up() == 1
+    assert await count_releases(sessions) == 1
