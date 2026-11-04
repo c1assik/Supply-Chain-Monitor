@@ -103,6 +103,42 @@ class Tree:
         return self.files[path].relative_to(self.base).as_posix()
 
 
+def overlaid(tree: Tree, underlay: Tree | None) -> Tree:
+    """`tree` installed over `underlay`: its files win, and the rest come from below.
+
+    Only for reading files by their paths: paths from below cannot be displayed relative to `tree`.
+    """
+    if underlay is None:
+        return tree
+    return Tree(tree.kind, tree.pure, tree.base, {**underlay.files, **tree.files})
+
+
+def wheel_tag(archive_name: str) -> tuple[str, ...]:
+    """`(python, abi, platform)` of a wheel file name: what tells its builds apart."""
+    parts = archive_name.removesuffix(".whl").split("-")
+    return tuple(parts[-3:]) if len(parts) >= 5 else ()
+
+
+def matching_wheel(name: str, candidates: list[Tree]) -> Tree | None:
+    """The wheel among `candidates` built for the same tags as `name`, or the same platform."""
+    tag = wheel_tag(name)
+    if not tag:
+        return None
+    tags = [(tree, wheel_tag(archive_name(tree))) for tree in candidates]
+    exact = [tree for tree, other in tags if other == tag]
+    platform = [tree for tree, other in tags if other[-1:] == tag[-1:]]
+    found = exact or platform
+    return found[0] if found else None
+
+
+def archive_name(tree: Tree) -> str:
+    """The file name of the archive a tree was unpacked from."""
+    first = next(iter(tree.files.values()), None)
+    if first is None:
+        return ""
+    return first.relative_to(tree.base).parts[0]
+
+
 def installed_paths(sdist: Tree, wheel: Tree | None) -> set[str] | None:
     """The sdist files that reach users, or None when there is no wheel to tell.
 

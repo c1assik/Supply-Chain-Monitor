@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from pypi_monitor.db.models import AnalysisRun, Package, Release, Signal, Verdict
 from pypi_monitor.db.session import Sessions
+from pypi_monitor.domain import DecidedBy
 
 _MAX_EVIDENCE = 200
 
@@ -26,14 +27,15 @@ async def release_report(sessions: Sessions, name: str, version: str) -> str:
         verdicts = list(
             await session.scalars(select(Verdict).where(Verdict.release_id == release.id))
         )
-        runs = list(
-            await session.scalars(select(AnalysisRun).where(AnalysisRun.release_id == release.id))
+        current = (AnalysisRun.release_id == release.id) & (
+            AnalysisRun.revision == release.revision
         )
+        runs = list(await session.scalars(select(AnalysisRun).where(current)))
         signals = list(
             await session.execute(
                 select(AnalysisRun.analyzer, Signal)
                 .join(Signal, Signal.run_id == AnalysisRun.id)
-                .where(AnalysisRun.release_id == release.id)
+                .where(current)
                 .order_by(AnalysisRun.analyzer, Signal.rule_id, Signal.id)
             )
         )
@@ -43,7 +45,13 @@ async def release_report(sessions: Sessions, name: str, version: str) -> str:
         f"compared with: {previous.version if previous else 'nothing'}",
         f"owners: {', '.join(release.maintainers) or 'unknown'}",
     ]
-    lines += [f"verdict: {v.level.value} {v.score}/100 ({v.decided_by.value})" for v in verdicts]
+    if release.revision:
+        lines.append(f"revision: {release.revision} (files were added after the first analysis)")
+    lines += [
+        f"verdict: {v.level.value} {v.score}/100 ({v.decided_by.value}"
+        + (f", revision {v.revision})" if v.decided_by is DecidedBy.AUTO else ")")
+        for v in verdicts
+    ]
     lines += [f"failed analyzer {run.analyzer}: {run.error}" for run in runs if run.error]
     for analyzer, signal in signals:
         location = signal.file_path or ""

@@ -19,6 +19,9 @@ own training data learns those releases by heart. Two things come from cross-val
 training part instead, folds split by package: the strength of the L2 penalty, and a margin on top
 of the alert level, so that the budget holds on releases the weights have not seen.
 
+The threshold aims at `TARGET_ALERTS_PER_DAY`, below the limit of the spec: the estimate on unseen
+releases still moves by a couple of alerts a day, and the limit is what must hold.
+
     python -m benchmarks.tune
 """
 
@@ -35,7 +38,6 @@ from packaging.utils import canonicalize_name
 
 from benchmarks.corpus import DATA_DIR, Group, Split, top_packages
 from benchmarks.malware import (
-    MAX_ALERTS_PER_DAY,
     POPULAR_RELEASES_PER_DAY,
     RELEASES_PER_DAY,
     Result,
@@ -62,6 +64,7 @@ L2 = 0.0005
 L2_GRID = (0.0005, 0.002, 0.005, 0.01, 0.02, 0.05)
 FOLDS = 5
 HIGH_LEVEL = 50
+TARGET_ALERTS_PER_DAY = 15
 # A rule alerts alone only when it means code that runs on install doing what malware does.
 # `capability-*` rules describe ordinary code, and no corpus of this size proves otherwise.
 PRECISE_PREFIX = "guarddog.install.threat-"
@@ -227,7 +230,7 @@ def calibrate(
     while True:
         tuned = apply_weights(config, weights, threshold, rows)
         metrics = compute_metrics(score_results(train, tuned, top))
-        if metrics.alerts_per_day <= MAX_ALERTS_PER_DAY:
+        if metrics.alerts_per_day <= TARGET_ALERTS_PER_DAY:
             return tuned
         threshold *= CALIBRATION_STEP
 
@@ -247,7 +250,7 @@ def train_model(train: Sequence[Result], config: ScoringConfig, l2: float) -> Mo
     # The bounds depend on the threshold, and the threshold on the weights.
     for _ in range(MAX_ROUNDS):
         weights = fit(rows, bounds, l2)
-        threshold = choose_threshold(train, weights, config, MAX_ALERTS_PER_DAY)
+        threshold = choose_threshold(train, weights, config, TARGET_ALERTS_PER_DAY)
         if abs(threshold - previous) < CONVERGED * threshold:
             break
         previous = threshold
@@ -306,7 +309,7 @@ def margin_for_budget(scored: Sequence[OutOfFold]) -> tuple[float, float]:
     }
     margin = 1.0
     for margin in sorted(candidates):
-        if alerts_per_day(scored, margin) <= MAX_ALERTS_PER_DAY:
+        if alerts_per_day(scored, margin) <= TARGET_ALERTS_PER_DAY:
             break
     malicious = [s for s in scored if s.result.malicious]
     recall = sum(s.ratio >= margin for s in malicious) / max(1, len(malicious))

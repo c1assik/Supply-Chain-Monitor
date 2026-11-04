@@ -1,6 +1,6 @@
 {
-  "train_recall": 0.7354,
-  "test_recall": 0.4638,
+  "train_recall": 0.7226,
+  "test_recall": 0.4709,
   "train_stream_fpr": 0.0,
   "test_stream_fpr": 0.0
 }

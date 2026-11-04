@@ -72,3 +72,98 @@ def test_a_body_emptied_by_the_reader_is_fine() -> None:
     function.body = []  # What is left once a docstring is dropped.
 
     assert import_time(tree).runs(1)
+
+
+def executed_calls(source: str) -> set[str]:
+    found = import_time(ast.parse(source))
+    lines = source.splitlines()
+    return {
+        lines[number - 1].strip()
+        for number in range(1, len(lines) + 1)
+        if found.runs(number) and "os.system" in lines[number - 1]
+    }
+
+
+def test_a_method_reached_through_its_class_runs() -> None:
+    source = """import os
+
+
+class C:
+    def run(self):
+        os.system("instance")
+        self._helper()
+
+    def _helper(self):
+        os.system("helper")
+
+    def idle(self):
+        os.system("idle")
+
+
+class H:
+    @staticmethod
+    def go():
+        os.system("static")
+
+
+class P:
+    @property
+    def value(self):
+        os.system("property")
+
+
+class Base:
+    def inherited(self):
+        os.system("inherited")
+
+
+class Child(Base):
+    pass
+
+
+class Ctx:
+    def __enter__(self):
+        os.system("enter")
+
+    def __exit__(self, *args):
+        pass
+
+
+class Callable:
+    def __call__(self):
+        os.system("call")
+
+
+C().run()
+H.go()
+P().value
+obj = Child()
+obj.inherited()
+with Ctx():
+    pass
+Callable()()
+"""
+    executed = executed_calls(source)
+
+    assert executed == {
+        f'os.system("{name}")'
+        for name in ("instance", "helper", "static", "property", "inherited", "enter", "call")
+    }
+
+
+def test_a_method_nobody_reaches_does_not_run() -> None:
+    source = """import os
+
+
+class C:
+    def run(self):
+        os.system("never")
+
+
+def unused():
+    C().run()
+
+
+C()
+"""
+    assert executed_calls(source) == set()

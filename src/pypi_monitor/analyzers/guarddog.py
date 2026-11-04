@@ -16,7 +16,15 @@ from guarddog.scanners.pypi_package_scanner import PypiPackageScanner
 
 from pypi_monitor.analyzers.base import Analyzer, ReleaseContext, Signal
 from pypi_monitor.analyzers.startup import StartupCode
-from pypi_monitor.analyzers.tree import Role, Tree, all_trees, role_of
+from pypi_monitor.analyzers.tree import (
+    WHEEL,
+    Role,
+    Tree,
+    all_trees,
+    artifact_trees,
+    overlaid,
+    role_of,
+)
 from pypi_monitor.domain import Severity
 
 log = logging.getLogger(__name__)
@@ -45,7 +53,7 @@ def _scanner() -> PypiPackageScanner:
 
 class GuardDogAnalyzer(Analyzer):
     name: ClassVar[str] = "guarddog"
-    version: ClassVar[str] = f"{metadata.version('guarddog')}+3"
+    version: ClassVar[str] = f"{metadata.version('guarddog')}+4"
 
     def __init__(self) -> None:
         self._rules = {rule.id: rule for rule in get_sourcecode_rules(ECOSYSTEM.PYPI, YaraRule)}
@@ -53,7 +61,14 @@ class GuardDogAnalyzer(Analyzer):
     def analyze(self, release: ReleaseContext) -> list[Signal]:
         if release.artifact_dir is None:
             raise ValueError("no unpacked artifact to scan")
-        return self.normalize(scan(release.artifact_dir), release.artifact_dir)
+        signals = self.normalize(scan(release.artifact_dir), release.artifact_dir)
+        extra = release.extra_wheels_dir
+        if extra is not None:
+            # What the other wheels left after deduplication, read as if installed over the
+            # first wheel: their `__init__.py` is usually the one that was dropped as a copy.
+            wheel = artifact_trees(release.artifact_dir).get(WHEEL)
+            signals += normalize_results(scan(extra), self._rules, extra, wheel)
+        return signals
 
     def normalize(self, results: dict[str, Any], artifact_dir: Path) -> list[Signal]:
         return normalize_results(results, self._rules, artifact_dir)
@@ -69,10 +84,14 @@ def scan(artifact_dir: Path) -> dict[str, Any]:
 
 
 def normalize_results(
-    results: dict[str, Any], rules: dict[str, Any], artifact_dir: Path
+    results: dict[str, Any],
+    rules: dict[str, Any],
+    artifact_dir: Path,
+    underlay: Tree | None = None,
 ) -> list[Signal]:
+    """Signals of GuardDog findings. `underlay`: files that the trees are installed over."""
     signals = []
-    places = _Places(artifact_dir)
+    places = _Places(artifact_dir, underlay)
     for rule_id, findings in results.items():
         # Rules without findings report an empty dict, not an empty list.
         if not findings:
@@ -108,8 +127,9 @@ def normalize_results(
 class _Places:
     """Where a finding sits in its artifact, read lazily: most releases have no threat findings."""
 
-    def __init__(self, artifact_dir: Path) -> None:
+    def __init__(self, artifact_dir: Path, underlay: Tree | None = None) -> None:
         self._artifact_dir = artifact_dir
+        self._underlay = underlay
         self._index: dict[str, tuple[Tree, str]] | None = None
         self._startup: dict[int, StartupCode] = {}
 
@@ -123,7 +143,9 @@ class _Places:
             return True
         if role is not Role.NORMAL:
             return False  # Tests, vendored code and the like: a test may well call `setup()`.
-        startup = self._startup.setdefault(id(tree), StartupCode(tree))
+        startup = self._startup.get(id(tree))
+        if startup is None:
+            startup = self._startup[id(tree)] = StartupCode(overlaid(tree, self._underlay))
         return startup.runs_at_import(path, line)
 
     def _find(self, file_path: str | None) -> tuple[Tree, str] | None:

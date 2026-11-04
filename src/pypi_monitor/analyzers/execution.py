@@ -3,19 +3,24 @@
 The answer is generous on purpose: a module-level statement runs, and so does a function or a
 constructor that import-time code names, whether it calls it, registers it with `atexit` or starts
 a thread with it. Payloads hide in exactly such helpers: `def _steal(): ...` and `_steal()` below.
+A method runs once import-time code reaches it through its class: `C().run()`, `C.go()`, a
+property read as `C().value`, `obj = C()` and then `obj.run()`, and `self.helper()` inside a method
+that runs. Methods are looked up in the bases defined in the same module too.
 What certainly does not run is a function nobody at the top level names, and the body of
 `if __name__ == "__main__"` or `if TYPE_CHECKING`.
 """
 
 import ast
 import bisect
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import TypeGuard
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _BODY_FIELDS = frozenset({"body", "orelse", "finalbody", "handlers", "cases"})
 _CONSTRUCTORS = frozenset({"__init__", "__new__", "__post_init__", "__init_subclass__"})
+# What `with C():` runs besides the constructor.
+_CONTEXT_METHODS = ("__enter__", "__exit__", "__aenter__", "__aexit__")
 _DYNAMIC_IMPORTS = frozenset({"__import__", "import_module"})
 
 ImportNode = ast.Import | ast.ImportFrom | ast.Call
@@ -60,6 +65,30 @@ def is_dynamic_import(node: ast.Call) -> str | None:
     return None
 
 
+def dynamic_import_package(node: ast.Call) -> str | None:
+    """What `package=` of `import_module(".x", package)` names, the way the module spells it.
+
+    A literal string is returned as is; `__name__`, `__package__` and `__spec__.parent` come back
+    as these names, for the caller to resolve against the module that holds the call.
+    """
+    argument = node.args[1] if len(node.args) > 1 else None
+    for keyword in node.keywords:
+        if keyword.arg == "package":
+            argument = keyword.value
+    if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+        return argument.value or None
+    if isinstance(argument, ast.Name) and argument.id in ("__name__", "__package__"):
+        return argument.id
+    if (
+        isinstance(argument, ast.Attribute)
+        and argument.attr == "parent"
+        and isinstance(argument.value, ast.Name)
+        and argument.value.id == "__spec__"
+    ):
+        return "__package__"
+    return None
+
+
 def _is_import(node: ast.AST) -> TypeGuard[ImportNode]:
     if isinstance(node, ast.Import | ast.ImportFrom):
         return True
@@ -72,7 +101,14 @@ class _Scan:
         self._functions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
         self._classes: dict[str, list[ast.ClassDef]] = {}
         self._index(tree.body, in_class=False)
+        # `obj = C()` anywhere: `obj.run()` is then a method of C. Names are not scoped, which errs
+        # towards running more.
+        self._instances: dict[str, set[str]] = {}
+        for node in ast.walk(tree):
+            self._note_instance(node)
         self._executed: set[ast.AST] = set()
+        # The class whose method is being scanned: `self.x` and `cls.x` there are its members.
+        self._owner: ast.ClassDef | None = None
         self._skipped_blocks: list[ast.If] = []
         self._imports: list[ImportNode] = []
 
@@ -120,6 +156,10 @@ class _Scan:
             elif isinstance(statement, ast.Import | ast.ImportFrom):
                 self._imports.append(statement)
             else:
+                if isinstance(statement, ast.With | ast.AsyncWith):
+                    for item in statement.items:
+                        for cls in self._classes_of(item.context_expr):
+                            self._run_members(cls, _CONTEXT_METHODS)
                 bodies = list(_bodies(statement))
                 self._names(_header(statement) if bodies else [statement])
                 for child in bodies:
@@ -134,14 +174,83 @@ class _Scan:
                     for function in self._functions.get(node.id, ()):
                         self._run(function)
                     for cls in self._classes.get(node.id, ()):
-                        for member in cls.body:
-                            if isinstance(member, _FUNCTIONS) and member.name in _CONSTRUCTORS:
-                                self._run(member)
+                        self._run_members(cls, _CONSTRUCTORS)
+                elif isinstance(node, ast.Attribute):
+                    for cls in self._classes_of(node.value):
+                        self._run_members(cls, (node.attr,))
+                if isinstance(node, ast.Call):
+                    # `C()()` and `obj()` run `__call__`; `C()` alone is the constructor above.
+                    for cls in self._called_instances(node.func):
+                        self._run_members(cls, ("__call__",))
 
-    def _run(self, function: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        if function not in self._executed:
-            self._executed.add(function)
+    def _note_instance(self, node: ast.AST) -> None:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            return
+        if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)):
+            return
+        if value.func.id not in self._classes:
+            return
+        for target in targets:
+            if isinstance(target, ast.Name):
+                self._instances.setdefault(target.id, set()).add(value.func.id)
+
+    def _classes_of(self, node: ast.AST) -> list[ast.ClassDef]:
+        """Classes whose members `node.x` may name: `C`, `C(...)`, an instance, `self`."""
+        if isinstance(node, ast.Call):
+            node = node.func
+        if not isinstance(node, ast.Name):
+            return []
+        found = list(self._classes.get(node.id, ()))
+        for cls_name in self._instances.get(node.id, ()):
+            found += self._classes.get(cls_name, ())
+        if node.id in ("self", "cls") and self._owner is not None:
+            found.append(self._owner)
+        return found
+
+    def _called_instances(self, function: ast.expr) -> list[ast.ClassDef]:
+        if isinstance(function, ast.Call) and isinstance(function.func, ast.Name):
+            return list(self._classes.get(function.func.id, ()))
+        if isinstance(function, ast.Name):
+            names = self._instances.get(function.id, ())
+            return [cls for name in names for cls in self._classes.get(name, ())]
+        return []
+
+    def _run_members(self, cls: ast.ClassDef, names: Iterable[str]) -> None:
+        wanted = set(names)
+        for owner in self._lineage(cls):
+            for member in owner.body:
+                if isinstance(member, _FUNCTIONS) and member.name in wanted:
+                    self._run(member, owner)
+
+    def _lineage(self, cls: ast.ClassDef) -> Iterator[ast.ClassDef]:
+        """The class and its bases that the module defines, each once."""
+        seen: set[ast.ClassDef] = set()
+        pending = [cls]
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            yield current
+            for base in current.bases:
+                if isinstance(base, ast.Name):
+                    pending += self._classes.get(base.id, ())
+
+    def _run(
+        self, function: ast.FunctionDef | ast.AsyncFunctionDef, owner: ast.ClassDef | None = None
+    ) -> None:
+        if function in self._executed:
+            return
+        self._executed.add(function)
+        outer, self._owner = self._owner, owner
+        try:
             self._scan(function.body)
+        finally:
+            self._owner = outer
 
 
 def _bodies(statement: ast.stmt) -> Iterator[list[ast.stmt]]:

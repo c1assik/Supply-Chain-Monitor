@@ -21,9 +21,13 @@ from pypi_monitor.analyzers.tree import (
     CodeReader,
     Role,
     Tree,
+    all_trees,
+    archive_name,
     artifact_trees,
     content_key,
     installed_paths,
+    matching_wheel,
+    overlaid,
     read_source,
     role_of,
 )
@@ -81,7 +85,7 @@ class _Baseline:
 
 class DiffAnalyzer(Analyzer):
     name: ClassVar[str] = "diff"
-    version: ClassVar[str] = "3"
+    version: ClassVar[str] = "4"
 
     def analyze(self, release: ReleaseContext) -> list[Signal]:
         if release.artifact_dir is None or release.previous_artifact_dir is None:
@@ -104,7 +108,37 @@ class DiffAnalyzer(Analyzer):
             old = next(iter(previous.values()))
             for tree in current.values():
                 signals += _diff(old, tree, reader, None)
+        if release.extra_wheels_dir is not None:
+            signals += _diff_extra_wheels(release, current, previous, reader)
         return _limited(signals)
+
+
+def _diff_extra_wheels(
+    release: ReleaseContext, current: dict[str, Tree], previous: dict[str, Tree], reader: CodeReader
+) -> Iterator[Signal]:
+    """The files that only another wheel of the release has, against everything known before.
+
+    A file is compared with the same path in the previous build for the same platform, then in
+    the first wheel of this release, then in the first wheel of the previous one. The first two
+    tell what is particular to the platform, so a Windows-only module is not new on every release.
+    """
+    assert release.extra_wheels_dir is not None  # noqa: S101
+    old_extras = []
+    if release.previous_extra_wheels_dir is not None:
+        old_extras = all_trees(release.previous_extra_wheels_dir)
+    old_wheel = previous.get(WHEEL) or previous.get(SDIST)
+    new_wheel = current.get(WHEEL)
+    for tree in all_trees(release.extra_wheels_dir):
+        layers = [old_wheel, new_wheel]
+        match = matching_wheel(archive_name(tree), old_extras)
+        if match is not None:
+            layers.append(overlaid(match, previous.get(WHEEL)))
+        files: dict[str, Path] = {}
+        for layer in layers:
+            if layer is not None:
+                files.update(layer.files)
+        reference = Tree(WHEEL, tree.pure, tree.base, files)
+        yield from _diff(reference, tree, reader, None)
 
 
 def _diff(old: Tree, new: Tree, reader: CodeReader, installed: set[str] | None) -> Iterator[Signal]:
@@ -126,8 +160,7 @@ def _diff(old: Tree, new: Tree, reader: CodeReader, installed: set[str] | None) 
             continue
         suffix = PurePosixPath(path).suffix
         if suffix not in _HANDLED_SUFFIXES and PurePosixPath(path).name != "entry_points.txt":
-            if role is not Role.IGNORED:
-                yield from _diff_other(new, path, real, role, before is None, rebuilt)
+            yield from _diff_other(new, path, real, before, role, rebuilt)
             continue
         source = read_source(real)
         if source is None:
@@ -158,51 +191,102 @@ _HANDLED_SUFFIXES = frozenset({".py", ".pth", ".toml"})
 
 
 def _diff_other(
-    tree: Tree, path: str, real: Path, role: Role, is_new: bool, rebuilt: list[str]
+    tree: Tree, path: str, real: Path, before: Path | None, role: Role, rebuilt: list[str]
 ) -> Iterator[Signal]:
-    """Files the diff cannot read as code: binaries, scripts and data."""
-    with real.open("rb") as file:
-        head = file.read(content.SAMPLE_BYTES)
-    kind = content.kind_of(path, head)
-    if kind is content.Kind.BINARY:
+    """Files the diff cannot read as code: binaries, scripts, data and archives of them."""
+    found = content.classify(path, real)
+    is_new = before is None
+    where = "" if found.member is None else f" inside an archive: {found.member.partition('!')[2]}"
+    if found.kind is content.Kind.BINARY:
         if not tree.pure and not is_new:
             rebuilt.append(path)
         elif not tree.pure:
             # Evidence for the context combos: a new native module is ordinary development.
             yield _signal(
-                "diff.file.new_platform_binary", Severity.LOW, 0.5, "new binary", tree, path, role
+                "diff.file.new_platform_binary",
+                Severity.LOW,
+                0.5,
+                f"new binary{where}",
+                tree,
+                path,
+                role,
             )
         elif is_new:
-            yield _new_binary(tree, path, role)
+            yield _signal(
+                "diff.file.new_binary", Severity.MEDIUM, 0.6, f"new binary{where}", tree, path, role
+            )
         else:
             # Pure artifacts that bundle a tool rebuild it too, so alone this is only evidence;
             # with a hijacked account or lost attestations it is a swapped binary.
             yield _signal(
-                "diff.file.binary_changed", Severity.LOW, 0.6, "binary changed", tree, path, role
-            )
-    elif not is_new:
-        return
-    elif kind is content.Kind.SCRIPT:
-        fetch = content.SCRIPT_FETCHES.search(head)
-        if fetch is None:
-            yield _signal("diff.file.new_script", Severity.LOW, 0.5, "new script", tree, path, role)
-        else:
-            line = head[: fetch.end()].count(b"\n") + 1
-            snippet = head.splitlines()[line - 1].decode("utf-8", "replace").strip()
-            yield _signal(
-                "diff.file.new_script_fetches",
-                Severity.MEDIUM,
-                0.7,
-                f"new script that downloads or decodes\n{snippet[:_MAX_SNIPPET]}",
+                "diff.file.binary_changed",
+                Severity.LOW,
+                0.6,
+                f"binary changed{where}",
                 tree,
                 path,
                 role,
-                line,
             )
-    elif kind is content.Kind.OPAQUE:
-        reason = content.opaque_reason(head) or ""
+    elif found.kind is content.Kind.SCRIPT:
+        yield from _diff_script(tree, path, real, before, role, found, where)
+    elif found.kind is content.Kind.OPAQUE and is_new:
         yield _signal(
-            "diff.file.new_blob", Severity.MEDIUM, 0.6, f"opaque data: {reason}", tree, path, role
+            "diff.file.new_blob",
+            Severity.MEDIUM,
+            0.6,
+            f"opaque data{where}: {found.reason or ''}",
+            tree,
+            path,
+            role,
+        )
+
+
+def _fetch_lines(text: bytes) -> dict[str, int]:
+    """Lines of a script that download or decode, normalized, with the number of the first."""
+    lines: dict[str, int] = {}
+    for number, line in enumerate(text.splitlines(), 1):
+        if content.SCRIPT_FETCHES.search(line):
+            lines.setdefault(" ".join(line.decode("utf-8", "replace").split()), number)
+    return lines
+
+
+def _diff_script(
+    tree: Tree,
+    path: str,
+    real: Path,
+    before: Path | None,
+    role: Role,
+    found: content.Content,
+    where: str,
+) -> Iterator[Signal]:
+    """A new script, or an old one that has started to download or decode.
+
+    `install.sh` that pipes `curl` into `sh` in the new release is a dropper whether the file is
+    new or not, so the downloading lines are compared with those of the old file.
+    """
+    if found.member is not None:
+        text, old = found.head, b""
+    else:
+        text = read_source(real) or found.head
+        old = (read_source(before) or b"") if before is not None else b""
+    known = _fetch_lines(old)
+    added = {line: number for line, number in _fetch_lines(text).items() if line not in known}
+    if added:
+        snippet, line = min(added.items(), key=lambda item: item[1])
+        what = "new script" if before is None else "script"
+        yield _signal(
+            "diff.file.new_script_fetches",
+            Severity.MEDIUM,
+            0.7,
+            f"{what}{where} that downloads or decodes\n{snippet[:_MAX_SNIPPET]}",
+            tree,
+            path,
+            role,
+            None if found.member is not None else line,
+        )
+    elif before is None:
+        yield _signal(
+            "diff.file.new_script", Severity.LOW, 0.5, f"new script{where}", tree, path, role
         )
 
 
@@ -354,10 +438,6 @@ def _diff_pyproject(
             path,
             Role.NORMAL,
         )
-
-
-def _new_binary(tree: Tree, path: str, role: Role) -> Signal:
-    return _signal("diff.file.new_binary", Severity.MEDIUM, 0.6, "new binary", tree, path, role)
 
 
 def _too_big(tree: Tree, path: str) -> Signal:

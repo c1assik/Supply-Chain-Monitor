@@ -467,6 +467,8 @@ def test_files_choice_prefers_sdist_and_a_pure_wheel() -> None:
     ]
 
     chosen = [f["filename"] for f in choose_files(files, 100)]
-    assert chosen == ["a-1.tar.gz", "a-1-py3-none-any.whl"]
+    # Every wheel, the one the diff compares first: a payload may be in one platform's only.
+    assert chosen == ["a-1.tar.gz", "a-1-py3-none-any.whl", "a-1-cp312-cp312-linux_x86_64.whl"]
+    assert [f["filename"] for f in choose_files(files, 100, max_wheels=1)] == chosen[:2]
 
     assert choose_files([file("big.tar.gz", "sdist", 101)], 100) == []

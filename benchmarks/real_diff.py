@@ -45,6 +45,7 @@ from benchmarks.malware import (
     Result,
     Scored,
     compute_metrics,
+    download_negatives,
     latest_results,
     load_results,
     prepare_sample,
@@ -66,7 +67,11 @@ from pypi_monitor.scoring import load_scoring_config
 log = logging.getLogger(__name__)
 
 CONCURRENCY = 8
-RESULTS_FILE = "real_diff.jsonl"
+# Results of another diff version must not pass for these: the version is in the name.
+RESULTS_FILE = f"real_diff.v{DiffAnalyzer.version}.jsonl"
+# Ordinary updates per group: the negatives of the quality benchmark are ten times more, and the
+# diff needs a baseline downloaded for each of them.
+NEGATIVES_PER_GROUP = 2000
 TOP_RULES = 10
 
 
@@ -172,7 +177,9 @@ def diff_sample(baseline: Baseline, data_dir: Path) -> dict[str, Any]:
 
 def run_scan(data_dir: Path, processes: int) -> Path:
     samples = [s for s in positives(data_dir) if s.group is Group.COMPROMISED]
-    samples += [s for s in negatives() if (data_dir / s.path).exists()]
+    ordinary = negatives(NEGATIVES_PER_GROUP)
+    asyncio.run(download_negatives(ordinary, data_dir))
+    samples += [s for s in ordinary if (data_dir / s.path).exists()]
     path = data_dir / RESULTS_FILE
     done = {row["id"] for row in _rows(path)}
     left = [sample for sample in samples if sample.id not in done]
